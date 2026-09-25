@@ -1,7 +1,9 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"strconv"
 	"strings"
@@ -30,12 +32,17 @@ type Config struct {
 // Load reads configuration from environment variables.
 // It optionally loads a .env file when present (local development).
 func Load() (*Config, error) {
-	_ = godotenv.Load()
+	// A missing .env is expected in deployed environments, but one that exists
+	// and fails to parse must fail loudly: godotenv loads nothing on error, which
+	// otherwise surfaces as a misleading "missing required environment variables".
+	if err := godotenv.Load(); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("parse .env: %w", err)
+	}
 
 	frontendRaw := getEnv("FRONTEND_URL", "http://localhost:3000")
 	cfg := &Config{
 		AppEnv:             getEnv("APP_ENV", "development"),
-		APIPort:            getEnv("API_PORT", "8080"),
+		APIPort:            getEnv("API_PORT", getEnv("PORT", "8080")),
 		DatabaseURL:        os.Getenv("DATABASE_URL"),
 		JWTSecret:          os.Getenv("JWT_SECRET"),
 		FrontendURL:        primaryFrontendURL(frontendRaw),
