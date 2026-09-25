@@ -227,3 +227,19 @@ func (r *SessionRepository) RotateRefreshSession(ctx context.Context, oldHash, n
 	}
 	return tx.Commit(ctx)
 }
+
+func (r *SessionRepository) UpdateProfile(ctx context.Context, userID, fullName, phone, timezone string) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE users
+		SET full_name = $2, phone = $3, timezone = $4, updated_at = NOW()
+		WHERE id = $1
+	`, userID, fullName, phone, timezone)
+	return err
+}
+
+func (r *SessionRepository) UpdatePasswordHash(ctx context.Context, userID, passwordHash string) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE users SET password_hash = $2, updated_at = NOW() WHERE id = $1
+	`, userID, passwordHash)
+	return err
+}

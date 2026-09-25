@@ -111,7 +111,7 @@ func (s *Service) Create(ctx context.Context, actorID string, in CreateInput, ip
 	return a, nil
 }
 
-func (s *Service) Update(ctx context.Context, actorID, id string, in UpdateInput, ip, ua string) (*Activity, error) {
+func (s *Service) Update(ctx context.Context, actorID, id string, in UpdateInput, ip, ua string) (*MutationResult, error) {
 	current, err := s.repo.Get(ctx, id)
 	if err != nil {
 		return nil, apperrors.Internal("failed to load activity", err)
@@ -176,7 +176,24 @@ func (s *Service) Update(ctx context.Context, actorID, id string, in UpdateInput
 			})
 		}
 	}
-	return a, nil
+	var nextID *string
+	completing := current.Status != "completed" && a.Status == "completed"
+	if completing && in.NextActivity != nil && strings.TrimSpace(in.NextActivity.DueAt) != "" {
+		id, err := s.ScheduleFollowUp(ctx, actorID, FollowUpRequest{
+			Next:       *in.NextActivity,
+			LeadID:     a.LeadID,
+			CustomerID: a.CustomerID,
+			DealID:     a.DealID,
+		}, ip, ua)
+		if err == nil {
+			nextID = &id
+		}
+	}
+	needs := false
+	if completing {
+		needs, _ = s.repo.LinkedNeedsNext(ctx, a.LeadID, a.CustomerID, a.DealID)
+	}
+	return &MutationResult{Activity: a, NeedsNextActivity: needs, NextActivityID: nextID}, nil
 }
 
 func (s *Service) FollowUp(ctx context.Context, leadID, customerID, dealID string) (*FollowUpIntel, error) {
@@ -259,6 +276,34 @@ func (s *Service) emitActivityTimeline(ctx context.Context, actorID string, a *A
 			LeadID: a.LeadID, CustomerID: a.CustomerID, DealID: a.DealID, ActivityID: &a.ID,
 		})
 	}
+}
+
+func (s *Service) ScheduleFollowUp(ctx context.Context, actorID string, in FollowUpRequest, ip, ua string) (string, error) {
+	title := strings.TrimSpace(in.Next.Title)
+	if title == "" {
+		title = "Follow up"
+	}
+	code := strings.TrimSpace(in.Next.TypeCode)
+	if code == "" {
+		code = "follow_up"
+	}
+	due := strings.TrimSpace(in.Next.DueAt)
+	if due == "" {
+		return "", apperrors.Validation("dueAt is required")
+	}
+	a, err := s.Create(ctx, actorID, CreateInput{
+		Title:      title,
+		TypeCode:   code,
+		Status:     "upcoming",
+		DueAt:      &due,
+		LeadID:     in.LeadID,
+		CustomerID: in.CustomerID,
+		DealID:     in.DealID,
+	}, ip, ua)
+	if err != nil {
+		return "", err
+	}
+	return a.ID, nil
 }
 
 func parseOptionalTime(v *string) (*time.Time, error) {

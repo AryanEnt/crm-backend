@@ -18,63 +18,63 @@ import (
 )
 
 type ActivityType struct {
-	ID                string `json:"id"`
-	Code              string `json:"code"`
-	Name              string `json:"name"`
-	Description       string `json:"description"`
-	Color             string `json:"color"`
-	Icon              string `json:"icon"`
-	IsSystem          bool   `json:"isSystem"`
-	IsActive          bool   `json:"isActive"`
-	AllowsExternal    bool   `json:"allowsExternal"`
-	Position          int    `json:"position"`
-	RequiresDatetime  bool   `json:"requiresDatetime"`
-	RequiresDuration  bool   `json:"requiresDuration"`
-	RequiresOutcome   bool   `json:"requiresOutcome"`
-	RequiresNotes     bool   `json:"requiresNotes"`
+	ID               string `json:"id"`
+	Code             string `json:"code"`
+	Name             string `json:"name"`
+	Description      string `json:"description"`
+	Color            string `json:"color"`
+	Icon             string `json:"icon"`
+	IsSystem         bool   `json:"isSystem"`
+	IsActive         bool   `json:"isActive"`
+	AllowsExternal   bool   `json:"allowsExternal"`
+	Position         int    `json:"position"`
+	RequiresDatetime bool   `json:"requiresDatetime"`
+	RequiresDuration bool   `json:"requiresDuration"`
+	RequiresOutcome  bool   `json:"requiresOutcome"`
+	RequiresNotes    bool   `json:"requiresNotes"`
 }
 
 type Activity struct {
-	ID               string         `json:"id"`
-	Title            string         `json:"title"`
-	Kind             string         `json:"kind"` // type code
-	TypeID           *string        `json:"typeId"`
-	TypeName         *string        `json:"typeName"`
-	TypeColor        *string        `json:"typeColor"`
-	Status           string         `json:"status"`
-	DisplayStatus    string         `json:"displayStatus"`
-	Priority         string         `json:"priority"`
-	Notes            string         `json:"notes"`
-	Outcome          string         `json:"outcome"`
-	OwnerUserID      *string        `json:"ownerUserId"`
-	OwnerName        *string        `json:"ownerName"`
-	CreatedByUserID  *string        `json:"createdByUserId"`
-	CreatedByName    *string        `json:"createdByName"`
-	CompletedByUserID *string       `json:"completedByUserId"`
-	CompletedByName  *string        `json:"completedByName"`
-	LeadID           *string        `json:"leadId"`
-	LeadName         *string        `json:"leadName"`
-	CustomerID       *string        `json:"customerId"`
-	CustomerName     *string        `json:"customerName"`
-	DealID           *string        `json:"dealId"`
-	DealTitle        *string        `json:"dealTitle"`
-	PipelineID       *string        `json:"pipelineId"`
-	PipelineName     *string        `json:"pipelineName"`
-	StartAt          *time.Time     `json:"startAt"`
-	EndAt            *time.Time     `json:"endAt"`
-	DueAt            *time.Time     `json:"dueAt"`
-	CompletedAt      *time.Time     `json:"completedAt"`
-	ExternalProvider string         `json:"externalProvider"`
-	ExternalID       string         `json:"externalId"`
-	ExternalThreadID string         `json:"externalThreadId"`
-	Metadata         map[string]any `json:"metadata"`
-	CreatedAt        time.Time      `json:"createdAt"`
-	UpdatedAt        time.Time      `json:"updatedAt"`
+	ID                string         `json:"id"`
+	Title             string         `json:"title"`
+	Kind              string         `json:"kind"` // type code
+	TypeID            *string        `json:"typeId"`
+	TypeName          *string        `json:"typeName"`
+	TypeColor         *string        `json:"typeColor"`
+	Status            string         `json:"status"`
+	DisplayStatus     string         `json:"displayStatus"`
+	Priority          string         `json:"priority"`
+	Notes             string         `json:"notes"`
+	Outcome           string         `json:"outcome"`
+	OwnerUserID       *string        `json:"ownerUserId"`
+	OwnerName         *string        `json:"ownerName"`
+	CreatedByUserID   *string        `json:"createdByUserId"`
+	CreatedByName     *string        `json:"createdByName"`
+	CompletedByUserID *string        `json:"completedByUserId"`
+	CompletedByName   *string        `json:"completedByName"`
+	LeadID            *string        `json:"leadId"`
+	LeadName          *string        `json:"leadName"`
+	CustomerID        *string        `json:"customerId"`
+	CustomerName      *string        `json:"customerName"`
+	DealID            *string        `json:"dealId"`
+	DealTitle         *string        `json:"dealTitle"`
+	PipelineID        *string        `json:"pipelineId"`
+	PipelineName      *string        `json:"pipelineName"`
+	StartAt           *time.Time     `json:"startAt"`
+	EndAt             *time.Time     `json:"endAt"`
+	DueAt             *time.Time     `json:"dueAt"`
+	CompletedAt       *time.Time     `json:"completedAt"`
+	ExternalProvider  string         `json:"externalProvider"`
+	ExternalID        string         `json:"externalId"`
+	ExternalThreadID  string         `json:"externalThreadId"`
+	Metadata          map[string]any `json:"metadata"`
+	CreatedAt         time.Time      `json:"createdAt"`
+	UpdatedAt         time.Time      `json:"updatedAt"`
 }
 
 type ActivityDetail struct {
-	Activity *Activity     `json:"activity"`
-	Context  *CRMContext   `json:"context"`
+	Activity *Activity   `json:"activity"`
+	Context  *CRMContext `json:"context"`
 }
 
 type CRMContext struct {
@@ -122,24 +122,44 @@ type CreateInput struct {
 }
 
 type UpdateInput struct {
-	Title            *string `json:"title"`
-	Kind             *string `json:"kind"`
-	TypeCode         *string `json:"typeCode"`
-	Notes            *string `json:"notes"`
-	Outcome          *string `json:"outcome"`
-	Status           *string `json:"status"`
-	Priority         *string `json:"priority"`
-	OwnerUserID      *string `json:"ownerUserId"`
-	LeadID           *string `json:"leadId"`
-	CustomerID       *string `json:"customerId"`
-	DealID           *string `json:"dealId"`
-	StartAt          *string `json:"startAt"`
-	EndAt            *string `json:"endAt"`
-	DueAt            *string `json:"dueAt"`
-	ClearDueAt       bool    `json:"clearDueAt"`
-	ExternalProvider *string `json:"externalProvider"`
-	ExternalID       *string `json:"externalId"`
-	ExternalThreadID *string `json:"externalThreadId"`
+	Title            *string            `json:"title"`
+	Kind             *string            `json:"kind"`
+	TypeCode         *string            `json:"typeCode"`
+	Notes            *string            `json:"notes"`
+	Outcome          *string            `json:"outcome"`
+	Status           *string            `json:"status"`
+	Priority         *string            `json:"priority"`
+	OwnerUserID      *string            `json:"ownerUserId"`
+	LeadID           *string            `json:"leadId"`
+	CustomerID       *string            `json:"customerId"`
+	DealID           *string            `json:"dealId"`
+	StartAt          *string            `json:"startAt"`
+	EndAt            *string            `json:"endAt"`
+	DueAt            *string            `json:"dueAt"`
+	ClearDueAt       bool               `json:"clearDueAt"`
+	ExternalProvider *string            `json:"externalProvider"`
+	ExternalID       *string            `json:"externalId"`
+	ExternalThreadID *string            `json:"externalThreadId"`
+	NextActivity     *NextActivityInput `json:"nextActivity"`
+}
+
+type NextActivityInput struct {
+	Title    string `json:"title"`
+	DueAt    string `json:"dueAt"`
+	TypeCode string `json:"typeCode"`
+}
+
+type FollowUpRequest struct {
+	Next       NextActivityInput
+	LeadID     *string
+	CustomerID *string
+	DealID     *string
+}
+
+type MutationResult struct {
+	*Activity
+	NeedsNextActivity bool    `json:"needsNextActivity"`
+	NextActivityID    *string `json:"nextActivityId,omitempty"`
 }
 
 type ListFilter struct {
@@ -558,6 +578,7 @@ func (r *Repository) touchRelated(ctx context.Context, lead, customer, deal *str
 	if lead != nil {
 		_, _ = r.pool.Exec(ctx, `
 			UPDATE leads SET
+				status = CASE WHEN status = 'inbox' THEN 'open' ELSE status END,
 				last_activity_at = CASE WHEN $2 IN ('completed') THEN NOW() ELSE last_activity_at END,
 				next_activity_at = CASE
 					WHEN $3::timestamptz IS NOT NULL AND $2 IN ('upcoming','due','overdue') THEN $3
@@ -588,6 +609,39 @@ func (r *Repository) touchRelated(ctx context.Context, lead, customer, deal *str
 			WHERE id=$1
 		`, *deal, status, due, now)
 	}
+}
+
+func (r *Repository) LinkedNeedsNext(ctx context.Context, leadID, customerID, dealID *string) (bool, error) {
+	lead, customer, deal := "", "", ""
+	if leadID != nil {
+		lead = *leadID
+	}
+	if customerID != nil {
+		customer = *customerID
+	}
+	if dealID != nil {
+		deal = *dealID
+	}
+	var needs bool
+	err := r.pool.QueryRow(ctx, `
+		SELECT
+			COALESCE((
+				SELECT l.status IN ('inbox','open','qualified')
+					AND (l.next_activity_at IS NULL OR l.next_activity_at <= NOW())
+				FROM leads l WHERE $1 <> '' AND l.id::text = $1
+			), FALSE)
+			OR COALESCE((
+				SELECT NOT c.is_archived
+					AND (c.next_follow_up_at IS NULL OR c.next_follow_up_at <= NOW())
+				FROM customers c WHERE $2 <> '' AND c.id::text = $2
+			), FALSE)
+			OR COALESCE((
+				SELECT d.status = 'open'
+					AND (d.next_activity_at IS NULL OR d.next_activity_at <= NOW())
+				FROM deals d WHERE $3 <> '' AND d.id::text = $3
+			), FALSE)
+	`, lead, customer, deal).Scan(&needs)
+	return needs, err
 }
 
 func (r *Repository) FollowUpIntel(ctx context.Context, leadID, customerID, dealID string) (*FollowUpIntel, error) {

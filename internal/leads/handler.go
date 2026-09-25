@@ -36,6 +36,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		Priority: q.Get("priority"), AnzscoID: q.Get("anzscoId"), Tag: q.Get("tag"),
 		CreatedFrom: q.Get("createdFrom"), CreatedTo: q.Get("createdTo"),
 		InactiveDays: inactive, IncludeArchived: q.Get("includeArchived") == "true",
+		Status: q.Get("status"), Attention: q.Get("attention"),
 		Sort: q.Get("sort"), Order: q.Get("order"), Limit: limit, Offset: offset,
 	}
 	if err := h.applyListScope(r, &f, seID); err != nil {
@@ -56,6 +57,16 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 	lead, err := h.service.Get(r.Context(), r.PathValue("id"))
+	if err != nil {
+		response.Fail(w, err)
+		return
+	}
+	response.OK(w, lead)
+}
+
+func (h *Handler) Qualify(w http.ResponseWriter, r *http.Request) {
+	claims, _ := auth.ClaimsFromContext(r.Context())
+	lead, err := h.service.Qualify(r.Context(), claims.UserID, r.PathValue("id"), clientIP(r), r.UserAgent())
 	if err != nil {
 		response.Fail(w, err)
 		return

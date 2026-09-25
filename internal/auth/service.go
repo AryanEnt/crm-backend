@@ -115,6 +115,94 @@ func (s *Service) Me(ctx context.Context, accessToken string) (*SessionUser, err
 	return s.buildSessionUser(ctx, user)
 }
 
+type UpdateProfileInput struct {
+	FullName *string `json:"fullName"`
+	Phone    *string `json:"phone"`
+	Timezone *string `json:"timezone"`
+}
+
+func (s *Service) UpdateProfile(ctx context.Context, userID string, in UpdateProfileInput) (*SessionUser, error) {
+	user, err := s.repo.FindUserByID(ctx, userID)
+	if err != nil {
+		return nil, apperrors.Internal("failed to load user", err)
+	}
+	if user == nil || !user.IsActive {
+		return nil, apperrors.Unauthorized("account is deactivated")
+	}
+
+	fullName := user.FullName
+	if in.FullName != nil {
+		fullName = strings.TrimSpace(*in.FullName)
+		if fullName == "" {
+			return nil, apperrors.Validation("full name is required")
+		}
+	}
+	phone := user.Phone
+	if in.Phone != nil {
+		phone = strings.TrimSpace(*in.Phone)
+	}
+	tz := coalesceTZ(user.Timezone)
+	if in.Timezone != nil {
+		tz = strings.TrimSpace(*in.Timezone)
+		if tz == "" {
+			return nil, apperrors.Validation("timezone is required")
+		}
+		if _, err := time.LoadLocation(tz); err != nil {
+			return nil, apperrors.Validation("invalid IANA timezone")
+		}
+	}
+
+	if err := s.repo.UpdateProfile(ctx, userID, fullName, phone, tz); err != nil {
+		return nil, apperrors.Internal("failed to update profile", err)
+	}
+	user.FullName = fullName
+	user.Phone = phone
+	user.Timezone = tz
+	return s.buildSessionUser(ctx, user)
+}
+
+type ChangePasswordInput struct {
+	CurrentPassword string `json:"currentPassword"`
+	NewPassword     string `json:"newPassword"`
+}
+
+// ChangePassword verifies the current password, sets a new hash, revokes all
+// refresh sessions, and issues a fresh session so the current device stays signed in.
+func (s *Service) ChangePassword(ctx context.Context, userID string, in ChangePasswordInput, userAgent, ip string) (*TokenPair, *SessionUser, error) {
+	if strings.TrimSpace(in.CurrentPassword) == "" {
+		return nil, nil, apperrors.Validation("current password is required")
+	}
+	if len(in.NewPassword) < 8 {
+		return nil, nil, apperrors.Validation("password must be at least 8 characters")
+	}
+	if in.CurrentPassword == in.NewPassword {
+		return nil, nil, apperrors.Validation("new password must be different from the current password")
+	}
+
+	user, err := s.repo.FindUserByID(ctx, userID)
+	if err != nil {
+		return nil, nil, apperrors.Internal("failed to load user", err)
+	}
+	if user == nil || !user.IsActive {
+		return nil, nil, apperrors.Unauthorized("account is deactivated")
+	}
+	if s.hasher.Compare(user.PasswordHash, in.CurrentPassword) != nil {
+		return nil, nil, apperrors.Unauthorized("current password is incorrect")
+	}
+
+	hash, err := s.hasher.Hash(in.NewPassword)
+	if err != nil {
+		return nil, nil, apperrors.Internal("failed to hash password", err)
+	}
+	if err := s.repo.UpdatePasswordHash(ctx, userID, hash); err != nil {
+		return nil, nil, apperrors.Internal("failed to update password", err)
+	}
+	_ = s.repo.RevokeAllUserSessions(ctx, userID)
+
+	user.PasswordHash = hash
+	return s.issueSession(ctx, user, userAgent, ip)
+}
+
 func (s *Service) AuthenticateAccessToken(ctx context.Context, accessToken string) (*Claims, error) {
 	parsed, err := s.jwt.ParseAccessToken(accessToken)
 	if err != nil {

@@ -25,21 +25,25 @@ type Option struct {
 }
 
 type Field struct {
-	ID           string    `json:"id"`
-	Entity       string    `json:"entity"`
-	Name         string    `json:"name"`
-	InternalKey  string    `json:"internalKey"`
-	FieldType    string    `json:"fieldType"`
-	Description  string    `json:"description"`
-	HelpText     string    `json:"helpText"`
-	IsRequired   bool      `json:"isRequired"`
-	IsActive     bool      `json:"isActive"`
-	DisplayOrder int       `json:"displayOrder"`
-	CreatedBy    *string   `json:"createdBy"`
-	CreatedByName *string  `json:"createdByName,omitempty"`
-	Options      []Option  `json:"options"`
-	CreatedAt    time.Time `json:"createdAt"`
-	UpdatedAt    time.Time `json:"updatedAt"`
+	ID            string    `json:"id"`
+	Entity        string    `json:"entity"`
+	Name          string    `json:"name"`
+	InternalKey   string    `json:"internalKey"`
+	FieldType     string    `json:"fieldType"`
+	Description   string    `json:"description"`
+	HelpText      string    `json:"helpText"`
+	IsRequired    bool      `json:"isRequired"`
+	IsActive      bool      `json:"isActive"`
+	DisplayOrder  int       `json:"displayOrder"`
+	PipelineID    *string   `json:"pipelineId"`
+	PipelineName  *string   `json:"pipelineName"`
+	StageID       *string   `json:"stageId"`
+	StageName     *string   `json:"stageName"`
+	CreatedBy     *string   `json:"createdBy"`
+	CreatedByName *string   `json:"createdByName,omitempty"`
+	Options       []Option  `json:"options"`
+	CreatedAt     time.Time `json:"createdAt"`
+	UpdatedAt     time.Time `json:"updatedAt"`
 }
 
 type OptionInput struct {
@@ -58,6 +62,8 @@ type CreateInput struct {
 	IsRequired   bool          `json:"isRequired"`
 	IsActive     *bool         `json:"isActive"`
 	DisplayOrder *int          `json:"displayOrder"`
+	PipelineID   *string       `json:"pipelineId"`
+	StageID      *string       `json:"stageId"`
 	Options      []OptionInput `json:"options"`
 }
 
@@ -68,6 +74,8 @@ type UpdateInput struct {
 	IsRequired   *bool          `json:"isRequired"`
 	IsActive     *bool          `json:"isActive"`
 	DisplayOrder *int           `json:"displayOrder"`
+	PipelineID   *string        `json:"pipelineId"`
+	StageID      *string        `json:"stageId"`
 	Options      *[]OptionInput `json:"options"`
 }
 
@@ -99,32 +107,57 @@ func validType(t string) bool {
 	return false
 }
 
-func (s *Service) List(ctx context.Context, entity, fieldType string, activeOnly bool, q string) ([]Field, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT cf.id::text, cf.entity, cf.name, cf.internal_key, cf.field_type, cf.description, cf.help_text,
-			cf.is_required, cf.is_active, cf.display_order, cf.created_by::text, u.full_name,
-			cf.created_at, cf.updated_at
-		FROM custom_fields cf
-		LEFT JOIN users u ON u.id = cf.created_by
+const fieldSelect = `
+	SELECT cf.id::text, cf.entity, cf.name, cf.internal_key, cf.field_type, cf.description, cf.help_text,
+		cf.is_required, cf.is_active, cf.display_order, cf.created_by::text, u.full_name,
+		cf.pipeline_id::text, p.name, cf.stage_id::text, ps.name,
+		cf.created_at, cf.updated_at
+	FROM custom_fields cf
+	LEFT JOIN users u ON u.id = cf.created_by
+	LEFT JOIN pipelines p ON p.id = cf.pipeline_id
+	LEFT JOIN pipeline_stages ps ON ps.id = cf.stage_id
+`
+
+func scanField(row pgx.Row) (Field, error) {
+	var f Field
+	var createdBy, createdByName, pipelineID, pipelineName, stageID, stageName *string
+	err := row.Scan(&f.ID, &f.Entity, &f.Name, &f.InternalKey, &f.FieldType, &f.Description, &f.HelpText,
+		&f.IsRequired, &f.IsActive, &f.DisplayOrder, &createdBy, &createdByName,
+		&pipelineID, &pipelineName, &stageID, &stageName, &f.CreatedAt, &f.UpdatedAt)
+	if err != nil {
+		return f, err
+	}
+	f.CreatedBy = createdBy
+	f.CreatedByName = createdByName
+	f.PipelineID = pipelineID
+	f.PipelineName = pipelineName
+	f.StageID = stageID
+	f.StageName = stageName
+	return f, nil
+}
+
+func (s *Service) List(ctx context.Context, entity, fieldType string, activeOnly bool, q, pipelineID, stageID string, applyScope bool) ([]Field, error) {
+	rows, err := s.pool.Query(ctx, fieldSelect+`
 		WHERE ($1 = '' OR cf.entity = $1)
 		  AND ($2 = '' OR cf.field_type = $2)
 		  AND ($3::bool = false OR cf.is_active = true)
 		  AND ($4 = '' OR cf.name ILIKE '%'||$4||'%' OR cf.internal_key ILIKE '%'||$4||'%')
-		ORDER BY cf.entity, cf.display_order, cf.name`, entity, fieldType, activeOnly, strings.TrimSpace(q))
+		  AND ($7::bool = false OR (
+			(cf.pipeline_id IS NULL AND cf.stage_id IS NULL)
+			OR ($5 <> '' AND cf.pipeline_id::text = $5 AND cf.stage_id IS NULL)
+			OR ($5 <> '' AND $6 <> '' AND cf.pipeline_id::text = $5 AND cf.stage_id::text = $6)
+		  ))
+		ORDER BY cf.entity, cf.display_order, cf.name`, entity, fieldType, activeOnly, strings.TrimSpace(q), pipelineID, stageID, applyScope)
 	if err != nil {
 		return nil, apperrors.Internal("failed to list custom fields", err)
 	}
 	defer rows.Close()
 	var out []Field
 	for rows.Next() {
-		var f Field
-		var createdBy, createdByName *string
-		if err := rows.Scan(&f.ID, &f.Entity, &f.Name, &f.InternalKey, &f.FieldType, &f.Description, &f.HelpText,
-			&f.IsRequired, &f.IsActive, &f.DisplayOrder, &createdBy, &createdByName, &f.CreatedAt, &f.UpdatedAt); err != nil {
+		f, err := scanField(rows)
+		if err != nil {
 			return nil, apperrors.Internal("scan custom field", err)
 		}
-		f.CreatedBy = createdBy
-		f.CreatedByName = createdByName
 		opts, _ := s.loadOptions(ctx, f.ID)
 		f.Options = opts
 		out = append(out, f)
@@ -136,22 +169,10 @@ func (s *Service) List(ctx context.Context, entity, fieldType string, activeOnly
 }
 
 func (s *Service) Get(ctx context.Context, id string) (*Field, error) {
-	var f Field
-	var createdBy, createdByName *string
-	err := s.pool.QueryRow(ctx, `
-		SELECT cf.id::text, cf.entity, cf.name, cf.internal_key, cf.field_type, cf.description, cf.help_text,
-			cf.is_required, cf.is_active, cf.display_order, cf.created_by::text, u.full_name,
-			cf.created_at, cf.updated_at
-		FROM custom_fields cf
-		LEFT JOIN users u ON u.id = cf.created_by
-		WHERE cf.id=$1::uuid`, id,
-	).Scan(&f.ID, &f.Entity, &f.Name, &f.InternalKey, &f.FieldType, &f.Description, &f.HelpText,
-		&f.IsRequired, &f.IsActive, &f.DisplayOrder, &createdBy, &createdByName, &f.CreatedAt, &f.UpdatedAt)
+	f, err := scanField(s.pool.QueryRow(ctx, fieldSelect+` WHERE cf.id=$1::uuid`, id))
 	if err != nil {
 		return nil, apperrors.NotFound("custom field not found")
 	}
-	f.CreatedBy = createdBy
-	f.CreatedByName = createdByName
 	f.Options, _ = s.loadOptions(ctx, f.ID)
 	return &f, nil
 }
@@ -196,6 +217,10 @@ func (s *Service) Create(ctx context.Context, actorID string, in CreateInput, ip
 	if (ft == "single_select" || ft == "multi_select") && len(in.Options) == 0 {
 		return nil, apperrors.Validation("select fields require at least one option")
 	}
+	pipelineID, stageID := scopeIDs(in.PipelineID, in.StageID)
+	if err := s.validateScope(ctx, pipelineID, stageID); err != nil {
+		return nil, err
+	}
 	active := true
 	if in.IsActive != nil {
 		active = *in.IsActive
@@ -214,15 +239,15 @@ func (s *Service) Create(ctx context.Context, actorID string, in CreateInput, ip
 	var id string
 	err = tx.QueryRow(ctx, `
 		INSERT INTO custom_fields (entity, name, internal_key, field_type, description, help_text,
-			is_required, is_active, display_order, created_by, updated_by)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::uuid,$10::uuid)
+			is_required, is_active, display_order, created_by, updated_by, pipeline_id, stage_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::uuid,$10::uuid,$11,$12)
 		RETURNING id::text`,
 		entity, name, key, ft, strings.TrimSpace(in.Description), strings.TrimSpace(in.HelpText),
-		in.IsRequired, active, order, actorID,
+		in.IsRequired, active, order, actorID, nullUUID(pipelineID), nullUUID(stageID),
 	).Scan(&id)
 	if err != nil {
-		if strings.Contains(err.Error(), "unique") {
-			return nil, apperrors.Conflict("internal key already exists for this entity")
+		if strings.Contains(err.Error(), "unique") || strings.Contains(err.Error(), "duplicate") {
+			return nil, apperrors.Conflict("internal key already exists for this pipeline and stage")
 		}
 		return nil, apperrors.Internal("create custom field", err)
 	}
@@ -267,6 +292,26 @@ func (s *Service) Update(ctx context.Context, actorID, id string, in UpdateInput
 	if in.DisplayOrder != nil {
 		order = *in.DisplayOrder
 	}
+	pipelineID := ""
+	if cur.PipelineID != nil {
+		pipelineID = *cur.PipelineID
+	}
+	stageID := ""
+	if cur.StageID != nil {
+		stageID = *cur.StageID
+	}
+	if in.PipelineID != nil {
+		pipelineID = strings.TrimSpace(*in.PipelineID)
+		if in.StageID == nil {
+			stageID = ""
+		}
+	}
+	if in.StageID != nil {
+		stageID = strings.TrimSpace(*in.StageID)
+	}
+	if err := s.validateScope(ctx, pipelineID, stageID); err != nil {
+		return nil, err
+	}
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -276,8 +321,8 @@ func (s *Service) Update(ctx context.Context, actorID, id string, in UpdateInput
 
 	_, err = tx.Exec(ctx, `
 		UPDATE custom_fields SET name=$2, description=$3, help_text=$4, is_required=$5, is_active=$6,
-			display_order=$7, updated_by=$8::uuid WHERE id=$1::uuid`,
-		id, name, desc, help, req, active, order, actorID)
+			display_order=$7, updated_by=$8::uuid, pipeline_id=$9, stage_id=$10 WHERE id=$1::uuid`,
+		id, name, desc, help, req, active, order, actorID, nullUUID(pipelineID), nullUUID(stageID))
 	if err != nil {
 		return nil, apperrors.Internal("update custom field", err)
 	}
@@ -309,6 +354,51 @@ func (s *Service) Delete(ctx context.Context, actorID, id string, ip, ua string)
 		return apperrors.NotFound("custom field not found")
 	}
 	_ = s.audit.Record(ctx, audit.Ptr(actorID), "custom_field.deleted", "custom_field", audit.Ptr(id), nil, ip, ua)
+	return nil
+}
+
+func scopeIDs(pipelineID, stageID *string) (string, string) {
+	p, s := "", ""
+	if pipelineID != nil {
+		p = strings.TrimSpace(*pipelineID)
+	}
+	if stageID != nil {
+		s = strings.TrimSpace(*stageID)
+	}
+	return p, s
+}
+
+func nullUUID(id string) any {
+	if strings.TrimSpace(id) == "" {
+		return nil
+	}
+	return id
+}
+
+func (s *Service) validateScope(ctx context.Context, pipelineID, stageID string) error {
+	if stageID != "" && pipelineID == "" {
+		return apperrors.Validation("choose a pipeline before a stage")
+	}
+	if pipelineID != "" {
+		var ok bool
+		if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pipelines WHERE id=$1 AND is_active=TRUE)`, pipelineID).Scan(&ok); err != nil {
+			return apperrors.Internal("failed to check pipeline", err)
+		}
+		if !ok {
+			return apperrors.Validation("pipeline is invalid or inactive")
+		}
+	}
+	if stageID != "" {
+		var ok bool
+		if err := s.pool.QueryRow(ctx, `
+			SELECT EXISTS(SELECT 1 FROM pipeline_stages WHERE id=$1 AND pipeline_id=$2 AND is_active=TRUE)
+		`, stageID, pipelineID).Scan(&ok); err != nil {
+			return apperrors.Internal("failed to check stage", err)
+		}
+		if !ok {
+			return apperrors.Validation("stage is not an active stage on this pipeline")
+		}
+	}
 	return nil
 }
 
@@ -370,11 +460,39 @@ func (s *Service) GetValues(ctx context.Context, entity, recordID string) (Value
 	return out, nil
 }
 
+func (s *Service) recordScope(ctx context.Context, entity, recordID string) (string, string) {
+	table := ""
+	switch entity {
+	case "lead":
+		table = "leads"
+	case "customer":
+		table = "customers"
+	case "deal":
+		table = "deals"
+	default:
+		return "", ""
+	}
+	var pipelineID, stageID *string
+	q := "SELECT pipeline_id::text, stage_id::text FROM " + table + " WHERE id=$1"
+	if err := s.pool.QueryRow(ctx, q, recordID).Scan(&pipelineID, &stageID); err != nil {
+		return "", ""
+	}
+	p, st := "", ""
+	if pipelineID != nil {
+		p = *pipelineID
+	}
+	if stageID != nil {
+		st = *stageID
+	}
+	return p, st
+}
+
 func (s *Service) SetValues(ctx context.Context, actorID, entity, recordID string, values ValueMap) error {
 	if !validEntity(entity) {
 		return apperrors.Validation("invalid entity")
 	}
-	defs, err := s.List(ctx, entity, "", true, "")
+	pipelineID, stageID := s.recordScope(ctx, entity, recordID)
+	defs, err := s.List(ctx, entity, "", true, "", pipelineID, stageID, true)
 	if err != nil {
 		return err
 	}

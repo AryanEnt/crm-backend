@@ -33,7 +33,8 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		Search: q.Get("q"), OwnerUserID: ownerID, TeamID: q.Get("teamId"),
 		Source: q.Get("source"), Country: q.Get("country"),
 		CreatedFrom: q.Get("createdFrom"), CreatedTo: q.Get("createdTo"),
-		Limit: limit, Offset: offset,
+		Attention: q.Get("attention"),
+		Limit:     limit, Offset: offset,
 	}
 	if err := h.applyListScope(r, &f, seID); err != nil {
 		response.Fail(w, err)

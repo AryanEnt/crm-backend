@@ -85,6 +85,10 @@ func validateAction(a Action) error {
 		if strings.TrimSpace(asString(p["title"])) == "" && strings.TrimSpace(asString(p["subject"])) == "" {
 			return fmt.Errorf("create_activity requires title")
 		}
+	case ActionSendEmail:
+		if strings.TrimSpace(asString(p["templateId"])) == "" {
+			return fmt.Errorf("send_email requires templateId")
+		}
 	}
 	return nil
 }
@@ -144,6 +148,7 @@ func BuilderCatalog() Catalog {
 			{Code: CondPriority, Label: "Priority"},
 			{Code: CondInactivityDays, Label: "Inactivity days"},
 			{Code: CondDealValue, Label: "Deal value"},
+			{Code: CondAttention, Label: "Attention", Description: "no_next_activity, overdue_next, over_sla, attention_needed, or no_recent_activity"},
 		},
 		Actions: []CatalogItem{
 			{Code: ActionCreateTask, Label: "Create task"},
@@ -153,6 +158,7 @@ func BuilderCatalog() Catalog {
 			{Code: ActionUpdateField, Label: "Update field"},
 			{Code: ActionAddTag, Label: "Add tag"},
 			{Code: ActionCreateActivity, Label: "Create activity"},
+			{Code: ActionSendEmail, Label: "Send templated email", Description: "Queue the owner's mailbox to send an email template"},
 		},
 		Operators: []CatalogItem{
 			{Code: OpEquals, Label: "is"},

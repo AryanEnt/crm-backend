@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/crm/backend/internal/attention"
 	"github.com/crm/backend/internal/audit"
 	"github.com/crm/backend/internal/automation"
 	"github.com/crm/backend/internal/customfields"
@@ -37,6 +38,9 @@ func (s *Service) recordSystemActivity(ctx context.Context, in systemactivity.Wr
 }
 
 func (s *Service) List(ctx context.Context, f ListFilter) ([]Customer, int, error) {
+	if !attention.ValidCode(f.Attention) {
+		return nil, 0, apperrors.Validation("invalid attention")
+	}
 	items, total, err := s.repo.List(ctx, f)
 	if err != nil {
 		return nil, 0, apperrors.Internal("failed to list customers", err)

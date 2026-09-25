@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/crm/backend/internal/attention"
 	"github.com/crm/backend/internal/datascope"
 )
 
@@ -23,7 +24,7 @@ const leadSelect = `
 		l.potential_value, l.expected_outcome, l.last_activity_at, l.next_activity_at,
 		l.status, l.converted_customer_id::text, l.converted_at, l.is_archived, l.archived_at,
 		GREATEST(0, EXTRACT(DAY FROM NOW() - l.created_at)::int),
-		l.created_at, l.updated_at
+		l.created_at, l.updated_at, ps.sla_hours
 	FROM leads l
 	LEFT JOIN users ou ON ou.id = l.owner_user_id
 	LEFT JOIN teams t ON t.id = l.team_id
@@ -43,6 +44,7 @@ func NewRepository(pool *pgxpool.Pool) *Repository {
 func scanLead(row pgx.Row) (*Lead, error) {
 	var l Lead
 	var tags, skills []string
+	var slaHours *int
 	err := row.Scan(
 		&l.ID, &l.FullName, &l.Email, &l.Phone, &l.Country, &l.Nationality, &l.Location,
 		&l.OwnerUserID, &l.OwnerName, &l.TeamID, &l.TeamName,
@@ -51,7 +53,7 @@ func scanLead(row pgx.Row) (*Lead, error) {
 		&l.Notes, &l.Occupation, &l.JobTitle, &l.Employer, &l.ExperienceYears, &l.Qualification, &skills,
 		&l.PotentialValue, &l.ExpectedOutcome, &l.LastActivityAt, &l.NextActivityAt,
 		&l.Status, &l.ConvertedCustomerID, &l.ConvertedAt, &l.IsArchived, &l.ArchivedAt,
-		&l.AgeDays, &l.CreatedAt, &l.UpdatedAt,
+		&l.AgeDays, &l.CreatedAt, &l.UpdatedAt, &slaHours,
 	)
 	if err != nil {
 		return nil, err
@@ -64,6 +66,15 @@ func scanLead(row pgx.Row) (*Lead, error) {
 	}
 	l.Tags = tags
 	l.Skills = skills
+	l.Attention = attention.Compute(attention.Input{
+		Closed:    l.IsArchived || l.Status == "converted" || l.Status == "archived" || l.Status == "unqualified",
+		Next:      l.NextActivityAt,
+		Last:      l.LastActivityAt,
+		Anchor:    l.UpdatedAt,
+		CreatedAt: l.CreatedAt,
+		SLAHours:  slaHours,
+		Now:       time.Now().UTC(),
+	})
 	return &l, nil
 }
 
@@ -73,6 +84,17 @@ func (r *Repository) Get(ctx context.Context, id string) (*Lead, error) {
 		return nil, nil
 	}
 	return l, err
+}
+
+func (r *Repository) SetStatus(ctx context.Context, id, status string) (*Lead, error) {
+	tag, err := r.pool.Exec(ctx, `UPDATE leads SET status=$2 WHERE id=$1`, id, status)
+	if err != nil {
+		return nil, err
+	}
+	if tag.RowsAffected() == 0 {
+		return nil, nil
+	}
+	return r.Get(ctx, id)
 }
 
 func (r *Repository) List(ctx context.Context, f ListFilter) ([]Lead, int, error) {
@@ -92,6 +114,29 @@ func (r *Repository) List(ctx context.Context, f ListFilter) ([]Lead, int, error
 
 	if !f.IncludeArchived {
 		where = append(where, "l.is_archived = FALSE")
+	}
+	switch f.Status {
+	case "":
+		// New leads start in inbox. The default table includes them with open and qualified work.
+		if f.IncludeArchived {
+			where = append(where, "l.status IN ('inbox','open','qualified','archived')")
+		} else {
+			where = append(where, "l.status IN ('inbox','open','qualified')")
+		}
+	case "working":
+		if f.IncludeArchived {
+			where = append(where, "l.status IN ('open','qualified','archived')")
+		} else {
+			where = append(where, "l.status IN ('open','qualified')")
+		}
+	case "all":
+	case "inbox", "open", "qualified", "converted", "unqualified", "archived":
+		add("l.status = $%d", f.Status)
+	default:
+		where = append(where, "FALSE")
+	}
+	if f.Attention != "" {
+		add("("+attention.LeadSQL+") = $%d", f.Attention)
 	}
 	if f.OwnerUserID != "" {
 		add("l.owner_user_id::text = $%d", f.OwnerUserID)
@@ -140,7 +185,7 @@ func (r *Repository) List(ctx context.Context, f ListFilter) ([]Lead, int, error
 	whereSQL := strings.Join(where, " AND ")
 
 	var total int
-	if err := r.pool.QueryRow(ctx, `SELECT COUNT(*) FROM leads l WHERE `+whereSQL, args...).Scan(&total); err != nil {
+	if err := r.pool.QueryRow(ctx, `SELECT COUNT(*) FROM leads l LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id WHERE `+whereSQL, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 

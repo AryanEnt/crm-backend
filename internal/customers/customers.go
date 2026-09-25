@@ -12,49 +12,51 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/crm/backend/internal/attention"
 	"github.com/crm/backend/internal/datascope"
 	"github.com/crm/backend/internal/leads"
 	"github.com/crm/backend/internal/referrals"
 )
 
 type Customer struct {
-	ID                   string     `json:"id"`
-	FullName             string     `json:"fullName"`
-	Email                *string    `json:"email"`
-	Phone                *string    `json:"phone"`
-	Country              string     `json:"country"`
-	Nationality          string     `json:"nationality"`
-	Location             string     `json:"location"`
-	OwnerUserID          *string    `json:"ownerUserId"`
-	OwnerName            *string    `json:"ownerName"`
-	TeamID               *string    `json:"teamId"`
-	TeamName             *string    `json:"teamName"`
-	Source               string     `json:"source"`
-	Priority             string     `json:"priority"`
-	Tags                 []string   `json:"tags"`
-	AnzscoID             *string    `json:"anzscoId"`
-	AnzscoCode           *string    `json:"anzscoCode"`
-	AnzscoTitle          *string    `json:"anzscoTitle"`
-	Occupation           string     `json:"occupation"`
-	JobTitle             string     `json:"jobTitle"`
-	Employer             string     `json:"employer"`
-	ExperienceYears      *float64   `json:"experienceYears"`
-	Qualification        string     `json:"qualification"`
-	Skills               []string   `json:"skills"`
-	PipelineID           *string    `json:"pipelineId"`
-	PipelineName         *string    `json:"pipelineName"`
-	StageID              *string    `json:"stageId"`
-	StageName            *string    `json:"stageName"`
-	PotentialValue       *float64   `json:"potentialValue"`
-	ExpectedOutcome      string     `json:"expectedOutcome"`
-	LastContactedAt      *time.Time `json:"lastContactedAt"`
-	NextFollowUpAt       *time.Time `json:"nextFollowUpAt"`
-	Notes                string     `json:"notes"`
-	ConvertedFromLeadID  *string    `json:"convertedFromLeadId"`
-	IsArchived           bool       `json:"isArchived"`
-	CreatedAt            time.Time  `json:"createdAt"`
-	UpdatedAt            time.Time  `json:"updatedAt"`
-	DealCount            int        `json:"dealCount,omitempty"`
+	ID                  string     `json:"id"`
+	FullName            string     `json:"fullName"`
+	Email               *string    `json:"email"`
+	Phone               *string    `json:"phone"`
+	Country             string     `json:"country"`
+	Nationality         string     `json:"nationality"`
+	Location            string     `json:"location"`
+	OwnerUserID         *string    `json:"ownerUserId"`
+	OwnerName           *string    `json:"ownerName"`
+	TeamID              *string    `json:"teamId"`
+	TeamName            *string    `json:"teamName"`
+	Source              string     `json:"source"`
+	Priority            string     `json:"priority"`
+	Tags                []string   `json:"tags"`
+	AnzscoID            *string    `json:"anzscoId"`
+	AnzscoCode          *string    `json:"anzscoCode"`
+	AnzscoTitle         *string    `json:"anzscoTitle"`
+	Occupation          string     `json:"occupation"`
+	JobTitle            string     `json:"jobTitle"`
+	Employer            string     `json:"employer"`
+	ExperienceYears     *float64   `json:"experienceYears"`
+	Qualification       string     `json:"qualification"`
+	Skills              []string   `json:"skills"`
+	PipelineID          *string    `json:"pipelineId"`
+	PipelineName        *string    `json:"pipelineName"`
+	StageID             *string    `json:"stageId"`
+	StageName           *string    `json:"stageName"`
+	PotentialValue      *float64   `json:"potentialValue"`
+	ExpectedOutcome     string     `json:"expectedOutcome"`
+	LastContactedAt     *time.Time `json:"lastContactedAt"`
+	NextFollowUpAt      *time.Time `json:"nextFollowUpAt"`
+	Notes               string     `json:"notes"`
+	ConvertedFromLeadID *string    `json:"convertedFromLeadId"`
+	IsArchived          bool       `json:"isArchived"`
+	Attention           string     `json:"attention"`
+	CreatedAt           time.Time  `json:"createdAt"`
+	UpdatedAt           time.Time  `json:"updatedAt"`
+	DealCount           int        `json:"dealCount,omitempty"`
 }
 
 type Profile360 struct {
@@ -78,15 +80,15 @@ type DealSummary struct {
 }
 
 type ActivityItem struct {
-	ID          string         `json:"id"`
-	Kind        string         `json:"kind"`
-	Subject     string         `json:"subject"`
-	Body        string         `json:"body"`
-	Status      string         `json:"status"`
-	DueAt       *time.Time     `json:"dueAt"`
-	ActorName   *string        `json:"actorName"`
-	Metadata    map[string]any `json:"metadata"`
-	CreatedAt   time.Time      `json:"createdAt"`
+	ID        string         `json:"id"`
+	Kind      string         `json:"kind"`
+	Subject   string         `json:"subject"`
+	Body      string         `json:"body"`
+	Status    string         `json:"status"`
+	DueAt     *time.Time     `json:"dueAt"`
+	ActorName *string        `json:"actorName"`
+	Metadata  map[string]any `json:"metadata"`
+	CreatedAt time.Time      `json:"createdAt"`
 }
 
 type DocumentItem struct {
@@ -106,58 +108,58 @@ type DocumentItem struct {
 }
 
 type CreateInput struct {
-	FullName        string   `json:"fullName"`
-	Email           *string  `json:"email"`
-	Phone           *string  `json:"phone"`
-	Country         string   `json:"country"`
-	Nationality     string   `json:"nationality"`
-	Location        string   `json:"location"`
-	OwnerUserID     *string  `json:"ownerUserId"`
-	TeamID          *string  `json:"teamId"`
-	Source          string   `json:"source"`
-	Priority        string   `json:"priority"`
-	Tags            []string `json:"tags"`
-	AnzscoID        *string  `json:"anzscoId"`
-	Occupation      string   `json:"occupation"`
-	JobTitle        string   `json:"jobTitle"`
-	Employer        string   `json:"employer"`
-	ExperienceYears *float64 `json:"experienceYears"`
-	Qualification   string   `json:"qualification"`
-	Skills          []string `json:"skills"`
-	PipelineID      *string  `json:"pipelineId"`
-	StageID         *string  `json:"stageId"`
-	PotentialValue  *float64 `json:"potentialValue"`
-	ExpectedOutcome string   `json:"expectedOutcome"`
-	Notes           string   `json:"notes"`
+	FullName        string           `json:"fullName"`
+	Email           *string          `json:"email"`
+	Phone           *string          `json:"phone"`
+	Country         string           `json:"country"`
+	Nationality     string           `json:"nationality"`
+	Location        string           `json:"location"`
+	OwnerUserID     *string          `json:"ownerUserId"`
+	TeamID          *string          `json:"teamId"`
+	Source          string           `json:"source"`
+	Priority        string           `json:"priority"`
+	Tags            []string         `json:"tags"`
+	AnzscoID        *string          `json:"anzscoId"`
+	Occupation      string           `json:"occupation"`
+	JobTitle        string           `json:"jobTitle"`
+	Employer        string           `json:"employer"`
+	ExperienceYears *float64         `json:"experienceYears"`
+	Qualification   string           `json:"qualification"`
+	Skills          []string         `json:"skills"`
+	PipelineID      *string          `json:"pipelineId"`
+	StageID         *string          `json:"stageId"`
+	PotentialValue  *float64         `json:"potentialValue"`
+	ExpectedOutcome string           `json:"expectedOutcome"`
+	Notes           string           `json:"notes"`
 	ForceCreate     bool             `json:"forceCreate"`
 	CustomFields    map[string]any   `json:"customFields"`
 	Referral        *referrals.Input `json:"referral"`
 }
 
 type UpdateInput struct {
-	FullName        *string  `json:"fullName"`
-	Email           *string  `json:"email"`
-	Phone           *string  `json:"phone"`
-	Country         *string  `json:"country"`
-	Nationality     *string  `json:"nationality"`
-	Location        *string  `json:"location"`
-	OwnerUserID     *string  `json:"ownerUserId"`
-	TeamID          *string  `json:"teamId"`
-	Source          *string  `json:"source"`
-	Priority        *string  `json:"priority"`
-	Tags            []string `json:"tags"`
-	AnzscoID        *string  `json:"anzscoId"`
-	Occupation      *string  `json:"occupation"`
-	JobTitle        *string  `json:"jobTitle"`
-	Employer        *string  `json:"employer"`
-	ExperienceYears *float64 `json:"experienceYears"`
-	Qualification   *string  `json:"qualification"`
-	Skills          []string `json:"skills"`
-	PipelineID      *string  `json:"pipelineId"`
-	StageID         *string  `json:"stageId"`
-	PotentialValue  *float64 `json:"potentialValue"`
-	ExpectedOutcome *string  `json:"expectedOutcome"`
-	Notes           *string  `json:"notes"`
+	FullName        *string        `json:"fullName"`
+	Email           *string        `json:"email"`
+	Phone           *string        `json:"phone"`
+	Country         *string        `json:"country"`
+	Nationality     *string        `json:"nationality"`
+	Location        *string        `json:"location"`
+	OwnerUserID     *string        `json:"ownerUserId"`
+	TeamID          *string        `json:"teamId"`
+	Source          *string        `json:"source"`
+	Priority        *string        `json:"priority"`
+	Tags            []string       `json:"tags"`
+	AnzscoID        *string        `json:"anzscoId"`
+	Occupation      *string        `json:"occupation"`
+	JobTitle        *string        `json:"jobTitle"`
+	Employer        *string        `json:"employer"`
+	ExperienceYears *float64       `json:"experienceYears"`
+	Qualification   *string        `json:"qualification"`
+	Skills          []string       `json:"skills"`
+	PipelineID      *string        `json:"pipelineId"`
+	StageID         *string        `json:"stageId"`
+	PotentialValue  *float64       `json:"potentialValue"`
+	ExpectedOutcome *string        `json:"expectedOutcome"`
+	Notes           *string        `json:"notes"`
 	NextFollowUpAt  *string        `json:"nextFollowUpAt"`
 	ForceUpdate     bool           `json:"forceUpdate"`
 	CustomFields    map[string]any `json:"customFields"`
@@ -171,6 +173,7 @@ type ListFilter struct {
 	Country       string
 	CreatedFrom   string
 	CreatedTo     string
+	Attention     string
 	Limit         int
 	Offset        int
 	ScopeUnscoped bool
@@ -225,6 +228,13 @@ func scanCustomer(row pgx.Row) (*Customer, error) {
 	}
 	c.Tags = tags
 	c.Skills = skills
+	c.Attention = attention.Compute(attention.Input{
+		Closed:    c.IsArchived,
+		Next:      c.NextFollowUpAt,
+		Last:      c.LastContactedAt,
+		CreatedAt: c.CreatedAt,
+		Now:       time.Now().UTC(),
+	})
 	return &c, nil
 }
 
@@ -263,6 +273,9 @@ func (r *Repository) List(ctx context.Context, f ListFilter) ([]Customer, int, e
 	}
 	if f.CreatedTo != "" {
 		add("c.created_at < (?::date + INTERVAL '1 day')", f.CreatedTo)
+	}
+	if f.Attention != "" {
+		add("("+attention.CustomerSQL+") = ?", f.Attention)
 	}
 	vis := datascope.Visibility{Unscoped: f.ScopeUnscoped, OwnerIDs: f.ScopeOwnerIDs, TeamIDs: f.ScopeTeamIDs}
 	where, args = datascope.AppendWhere(where, args, vis, datascope.Columns{Owner: "c.owner_user_id", Team: "c.team_id"})

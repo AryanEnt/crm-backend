@@ -22,7 +22,7 @@ func clientIP(r *http.Request) string {
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	activeOnly := q.Get("activeOnly") == "true" || q.Get("active") == "true"
-	items, err := h.service.List(r.Context(), q.Get("entity"), q.Get("fieldType"), activeOnly, q.Get("q"))
+	items, err := h.service.List(r.Context(), q.Get("entity"), q.Get("fieldType"), activeOnly, q.Get("q"), q.Get("pipelineId"), q.Get("stageId"), q.Get("applyScope") == "true")
 	if err != nil {
 		response.Fail(w, err)
 		return

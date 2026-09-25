@@ -82,6 +82,8 @@ func contextValue(field string, ctx map[string]any) any {
 		return ctx["inactivityDays"]
 	case CondDealValue:
 		return ctx["dealValue"]
+	case CondAttention:
+		return ctx["attention"]
 	default:
 		return ctx[field]
 	}

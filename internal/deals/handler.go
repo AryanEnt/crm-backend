@@ -98,6 +98,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		OwnerID:    ownerID,
 		TeamID:     q.Get("teamId"),
 		Status:     q.Get("status"),
+		Attention:  q.Get("attention"),
 		Limit:      limit,
 		Offset:     offset,
 	}
@@ -121,7 +122,13 @@ func (h *Handler) Board(w http.ResponseWriter, r *http.Request) {
 		response.Fail(w, apperrors.Validation("pipelineId is required"))
 		return
 	}
-	board, err := h.service.Board(r.Context(), pipelineID)
+	seID := firstNonEmpty(r.URL.Query().Get("salesExecutiveId"), r.URL.Query().Get("sales_executive_id"))
+	f := ListFilter{PipelineID: pipelineID, Status: "open"}
+	if err := h.applyListScope(r, &f, seID); err != nil {
+		response.Fail(w, err)
+		return
+	}
+	board, err := h.service.Board(r.Context(), f)
 	if err != nil {
 		response.Fail(w, err)
 		return
@@ -176,8 +183,12 @@ func (h *Handler) Move(w http.ResponseWriter, r *http.Request) {
 		response.Fail(w, err)
 		return
 	}
-	claims, _ := auth.ClaimsFromContext(r.Context())
-	d, err := h.service.Move(r.Context(), claims.UserID, r.PathValue("id"), in, clientIP(r), r.UserAgent())
+	claims, ok := auth.ClaimsFromContext(r.Context())
+	if !ok {
+		response.Fail(w, apperrors.Unauthorized("authentication required"))
+		return
+	}
+	d, err := h.service.Move(r.Context(), claims, r.PathValue("id"), in, clientIP(r), r.UserAgent())
 	if err != nil {
 		response.Fail(w, err)
 		return

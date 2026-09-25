@@ -11,6 +11,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/crm/backend/internal/activities"
+	"github.com/crm/backend/internal/attention"
 	"github.com/crm/backend/internal/datascope"
 	"github.com/crm/backend/internal/pipelines"
 )
@@ -79,28 +81,28 @@ type ActivityItem struct {
 }
 
 type DocumentItem struct {
-	ID              string     `json:"id"`
-	Name            string     `json:"name"`
-	DocType         string     `json:"type"`
-	Category        string     `json:"category"`
-	Status          string     `json:"status"`
-	MimeType        string     `json:"mimeType"`
-	SizeBytes       int64      `json:"sizeBytes"`
-	UploadedByName  *string    `json:"uploadedByName"`
-	VerifiedByName  *string    `json:"verifiedByName"`
-	RequestedAt     *time.Time `json:"requestedDate"`
-	UploadedAt      *time.Time `json:"uploadedDate"`
-	ExpiresAt       *time.Time `json:"expiryDate"`
-	CreatedAt       time.Time  `json:"createdAt"`
+	ID             string     `json:"id"`
+	Name           string     `json:"name"`
+	DocType        string     `json:"type"`
+	Category       string     `json:"category"`
+	Status         string     `json:"status"`
+	MimeType       string     `json:"mimeType"`
+	SizeBytes      int64      `json:"sizeBytes"`
+	UploadedByName *string    `json:"uploadedByName"`
+	VerifiedByName *string    `json:"verifiedByName"`
+	RequestedAt    *time.Time `json:"requestedDate"`
+	UploadedAt     *time.Time `json:"uploadedDate"`
+	ExpiresAt      *time.Time `json:"expiryDate"`
+	CreatedAt      time.Time  `json:"createdAt"`
 }
 
 type DealDetail struct {
-	Deal         *Deal             `json:"deal"`
-	Customer     map[string]any    `json:"customer"`
-	Transitions  []StageTransition `json:"transitions"`
-	Activities   []ActivityItem    `json:"activities"`
-	Documents    []DocumentItem    `json:"documents"`
-	Pipeline     *pipelines.Pipeline `json:"pipeline"`
+	Deal        *Deal               `json:"deal"`
+	Customer    map[string]any      `json:"customer"`
+	Transitions []StageTransition   `json:"transitions"`
+	Activities  []ActivityItem      `json:"activities"`
+	Documents   []DocumentItem      `json:"documents"`
+	Pipeline    *pipelines.Pipeline `json:"pipeline"`
 }
 
 type BoardColumn struct {
@@ -149,10 +151,11 @@ type UpdateInput struct {
 }
 
 type MoveInput struct {
-	StageID    string `json:"stageId"`
-	PipelineID string `json:"pipelineId"`
-	Force      bool   `json:"force"`
-	LostReason string `json:"lostReason"`
+	StageID      string                        `json:"stageId"`
+	PipelineID   string                        `json:"pipelineId"`
+	Force        bool                          `json:"force"`
+	LostReason   string                        `json:"lostReason"`
+	NextActivity *activities.NextActivityInput `json:"nextActivity"`
 }
 
 type ListFilter struct {
@@ -161,6 +164,7 @@ type ListFilter struct {
 	OwnerID       string
 	TeamID        string
 	Status        string
+	Attention     string
 	Limit         int
 	Offset        int
 	ScopeUnscoped bool
@@ -222,31 +226,19 @@ func scanDeal(row pgx.Row) (*Deal, error) {
 }
 
 func computeAttention(d Deal, slaHours *int) string {
-	if d.Status == "lost" || d.Status == "won" || d.Status == "archived" {
-		return ""
+	anchor := d.StageEnteredAt
+	if anchor.IsZero() {
+		anchor = d.CreatedAt
 	}
-	if d.NextActivityAt == nil {
-		return "no_next_activity"
-	}
-	if slaHours != nil && *slaHours > 0 {
-		hoursInStage := time.Since(d.StageEnteredAt).Hours()
-		if hoursInStage > float64(*slaHours) {
-			return "over_sla"
-		}
-		if hoursInStage > float64(*slaHours)*0.8 {
-			return "attention_needed"
-		}
-	}
-	const inactiveDays = 7
-	ref := d.LastActivityAt
-	if ref == nil {
-		t := d.CreatedAt
-		ref = &t
-	}
-	if time.Since(*ref) > time.Duration(inactiveDays)*24*time.Hour {
-		return "no_recent_activity"
-	}
-	return ""
+	return attention.Compute(attention.Input{
+		Closed:    d.Status != "open",
+		Next:      d.NextActivityAt,
+		Last:      d.LastActivityAt,
+		Anchor:    anchor,
+		CreatedAt: d.CreatedAt,
+		SLAHours:  slaHours,
+		Now:       time.Now().UTC(),
+	})
 }
 
 func (r *Repository) Get(ctx context.Context, id string) (*Deal, error) {
@@ -281,6 +273,9 @@ func (r *Repository) List(ctx context.Context, f ListFilter) ([]Deal, int, error
 	} else if f.Status != "all" {
 		where = append(where, "d.status = 'open'")
 	}
+	if f.Attention != "" {
+		add("("+attention.DealSQL+") = ?", f.Attention)
+	}
 	if f.Search != "" {
 		args = append(args, "%"+strings.ToLower(f.Search)+"%")
 		n := "$" + itoa(len(args))
@@ -290,7 +285,7 @@ func (r *Repository) List(ctx context.Context, f ListFilter) ([]Deal, int, error
 	where, args = datascope.AppendWhere(where, args, vis, datascope.Columns{Owner: "d.owner_user_id", Team: "d.team_id"})
 	whereSQL := strings.Join(where, " AND ")
 	var total int
-	countSQL := `SELECT COUNT(*) FROM deals d JOIN customers c ON c.id = d.customer_id WHERE ` + whereSQL
+	countSQL := `SELECT COUNT(*) FROM deals d JOIN customers c ON c.id = d.customer_id LEFT JOIN pipeline_stages ps ON ps.id = d.stage_id WHERE ` + whereSQL
 	if err := r.pool.QueryRow(ctx, countSQL, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
@@ -316,11 +311,16 @@ func (r *Repository) List(ctx context.Context, f ListFilter) ([]Deal, int, error
 	return items, total, rows.Err()
 }
 
-func (r *Repository) Board(ctx context.Context, pipelineID string) ([]Deal, error) {
+func (r *Repository) Board(ctx context.Context, f ListFilter) ([]Deal, error) {
+	where := []string{"d.pipeline_id::text = $1", "d.status IN ('open', 'won', 'lost')"}
+	args := []any{f.PipelineID}
+	vis := datascope.Visibility{Unscoped: f.ScopeUnscoped, OwnerIDs: f.ScopeOwnerIDs, TeamIDs: f.ScopeTeamIDs}
+	where, args = datascope.AppendWhere(where, args, vis, datascope.Columns{Owner: "d.owner_user_id", Team: "d.team_id"})
+	whereSQL := strings.Join(where, " AND ")
 	rows, err := r.pool.Query(ctx, dealSelect+`
-		WHERE d.pipeline_id::text = $1 AND d.status IN ('open', 'won', 'lost')
+		WHERE `+whereSQL+`
 		ORDER BY d.stage_entered_at ASC, d.created_at ASC
-	`, pipelineID)
+	`, args...)
 	if err != nil {
 		return nil, err
 	}

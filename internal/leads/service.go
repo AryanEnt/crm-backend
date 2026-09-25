@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/crm/backend/internal/attention"
 	"github.com/crm/backend/internal/audit"
 	"github.com/crm/backend/internal/auth"
 	"github.com/crm/backend/internal/automation"
@@ -37,6 +38,12 @@ func (s *Service) recordSystemActivity(ctx context.Context, in systemactivity.Wr
 }
 
 func (s *Service) List(ctx context.Context, f ListFilter) ([]Lead, int, error) {
+	if !validLeadStatus(f.Status) {
+		return nil, 0, apperrors.Validation("invalid status")
+	}
+	if !attention.ValidCode(f.Attention) {
+		return nil, 0, apperrors.Validation("invalid attention")
+	}
 	items, total, err := s.repo.List(ctx, f)
 	if err != nil {
 		return nil, 0, apperrors.Internal("failed to list leads", err)
@@ -53,6 +60,40 @@ func (s *Service) Get(ctx context.Context, id string) (*Lead, error) {
 		return nil, apperrors.NotFound("lead not found")
 	}
 	return l, nil
+}
+
+func (s *Service) Qualify(ctx context.Context, actorID, id, ip, ua string) (*Lead, error) {
+	current, err := s.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	switch current.Status {
+	case "qualified":
+		return current, nil
+	case "inbox", "open":
+	default:
+		return nil, apperrors.Validation("only inbox or open leads can be qualified")
+	}
+	lead, err := s.repo.SetStatus(ctx, id, "qualified")
+	if err != nil {
+		return nil, apperrors.Internal("failed to qualify lead", err)
+	}
+	if lead == nil {
+		return nil, apperrors.NotFound("lead not found")
+	}
+	_ = s.audit.Record(ctx, audit.Ptr(actorID), "lead.qualified", "lead", audit.Ptr(id), map[string]any{
+		"from": current.Status, "to": "qualified",
+	}, ip, ua)
+	return lead, nil
+}
+
+func validLeadStatus(status string) bool {
+	switch status {
+	case "", "all", "working", "inbox", "open", "qualified", "converted", "unqualified", "archived":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Service) Create(ctx context.Context, actorID string, in CreateInput, ip, ua string) (*CreateResult, error) {

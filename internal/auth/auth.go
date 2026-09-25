@@ -58,6 +58,8 @@ type Authenticator interface {
 	Logout(ctx context.Context, refreshToken string) error
 	Refresh(ctx context.Context, refreshToken, userAgent, ip string) (*TokenPair, *SessionUser, error)
 	Me(ctx context.Context, accessToken string) (*SessionUser, error)
+	UpdateProfile(ctx context.Context, userID string, in UpdateProfileInput) (*SessionUser, error)
+	ChangePassword(ctx context.Context, userID string, in ChangePasswordInput, userAgent, ip string) (*TokenPair, *SessionUser, error)
 }
 
 type contextKey string

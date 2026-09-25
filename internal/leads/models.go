@@ -45,67 +45,68 @@ type Lead struct {
 	IsArchived          bool       `json:"isArchived"`
 	ArchivedAt          *time.Time `json:"archivedAt"`
 	AgeDays             int        `json:"ageDays"`
+	Attention           string     `json:"attention"`
 	CreatedAt           time.Time  `json:"createdAt"`
 	UpdatedAt           time.Time  `json:"updatedAt"`
 }
 
 type CreateInput struct {
-	FullName        string   `json:"fullName"`
-	Email           *string  `json:"email"`
-	Phone           *string  `json:"phone"`
-	Country         string   `json:"country"`
-	Nationality     string   `json:"nationality"`
-	Location        string   `json:"location"`
-	OwnerUserID     *string  `json:"ownerUserId"`
-	TeamID          *string  `json:"teamId"`
-	Source          string   `json:"source"`
-	Priority        string   `json:"priority"`
-	Tags            []string `json:"tags"`
-	AnzscoID        *string  `json:"anzscoId"`
-	PipelineID      *string  `json:"pipelineId"`
-	StageID         *string  `json:"stageId"`
-	Notes           string   `json:"notes"`
-	Occupation      string   `json:"occupation"`
-	JobTitle        string   `json:"jobTitle"`
-	Employer        string   `json:"employer"`
-	ExperienceYears *float64 `json:"experienceYears"`
-	Qualification   string   `json:"qualification"`
-	Skills          []string `json:"skills"`
-	PotentialValue  *float64 `json:"potentialValue"`
-	ExpectedOutcome string   `json:"expectedOutcome"`
-	NextActivityAt  *string  `json:"nextActivityAt"`
-	ForceCreate     bool             `json:"forceCreate"`
-	CustomFields    map[string]any   `json:"customFields"`
+	FullName        string         `json:"fullName"`
+	Email           *string        `json:"email"`
+	Phone           *string        `json:"phone"`
+	Country         string         `json:"country"`
+	Nationality     string         `json:"nationality"`
+	Location        string         `json:"location"`
+	OwnerUserID     *string        `json:"ownerUserId"`
+	TeamID          *string        `json:"teamId"`
+	Source          string         `json:"source"`
+	Priority        string         `json:"priority"`
+	Tags            []string       `json:"tags"`
+	AnzscoID        *string        `json:"anzscoId"`
+	PipelineID      *string        `json:"pipelineId"`
+	StageID         *string        `json:"stageId"`
+	Notes           string         `json:"notes"`
+	Occupation      string         `json:"occupation"`
+	JobTitle        string         `json:"jobTitle"`
+	Employer        string         `json:"employer"`
+	ExperienceYears *float64       `json:"experienceYears"`
+	Qualification   string         `json:"qualification"`
+	Skills          []string       `json:"skills"`
+	PotentialValue  *float64       `json:"potentialValue"`
+	ExpectedOutcome string         `json:"expectedOutcome"`
+	NextActivityAt  *string        `json:"nextActivityAt"`
+	ForceCreate     bool           `json:"forceCreate"`
+	CustomFields    map[string]any `json:"customFields"`
 	// When Source is "Referral", Referral is required (structured — not free-text referredBy).
 	Referral *referrals.Input `json:"referral"`
 }
 
 type UpdateInput struct {
-	FullName        *string  `json:"fullName"`
-	Email           *string  `json:"email"`
-	Phone           *string  `json:"phone"`
-	Country         *string  `json:"country"`
-	Nationality     *string  `json:"nationality"`
-	Location        *string  `json:"location"`
-	OwnerUserID     *string  `json:"ownerUserId"`
-	TeamID          *string  `json:"teamId"`
-	Source          *string  `json:"source"`
-	Priority        *string  `json:"priority"`
-	Tags            []string `json:"tags"`
-	AnzscoID        *string  `json:"anzscoId"`
-	PipelineID      *string  `json:"pipelineId"`
-	StageID         *string  `json:"stageId"`
-	Notes           *string  `json:"notes"`
-	Occupation      *string  `json:"occupation"`
-	JobTitle        *string  `json:"jobTitle"`
-	Employer        *string  `json:"employer"`
-	ExperienceYears *float64 `json:"experienceYears"`
-	Qualification   *string  `json:"qualification"`
-	Skills          []string `json:"skills"`
-	PotentialValue  *float64 `json:"potentialValue"`
-	ExpectedOutcome *string  `json:"expectedOutcome"`
-	NextActivityAt  *string  `json:"nextActivityAt"`
-	Status          *string  `json:"status"`
+	FullName        *string        `json:"fullName"`
+	Email           *string        `json:"email"`
+	Phone           *string        `json:"phone"`
+	Country         *string        `json:"country"`
+	Nationality     *string        `json:"nationality"`
+	Location        *string        `json:"location"`
+	OwnerUserID     *string        `json:"ownerUserId"`
+	TeamID          *string        `json:"teamId"`
+	Source          *string        `json:"source"`
+	Priority        *string        `json:"priority"`
+	Tags            []string       `json:"tags"`
+	AnzscoID        *string        `json:"anzscoId"`
+	PipelineID      *string        `json:"pipelineId"`
+	StageID         *string        `json:"stageId"`
+	Notes           *string        `json:"notes"`
+	Occupation      *string        `json:"occupation"`
+	JobTitle        *string        `json:"jobTitle"`
+	Employer        *string        `json:"employer"`
+	ExperienceYears *float64       `json:"experienceYears"`
+	Qualification   *string        `json:"qualification"`
+	Skills          []string       `json:"skills"`
+	PotentialValue  *float64       `json:"potentialValue"`
+	ExpectedOutcome *string        `json:"expectedOutcome"`
+	NextActivityAt  *string        `json:"nextActivityAt"`
+	Status          *string        `json:"status"`
 	ForceUpdate     bool           `json:"forceUpdate"`
 	CustomFields    map[string]any `json:"customFields"`
 }
@@ -124,6 +125,8 @@ type ListFilter struct {
 	CreatedTo       string
 	InactiveDays    int
 	IncludeArchived bool
+	Status          string
+	Attention       string
 	Sort            string
 	Order           string
 	Limit           int
@@ -144,9 +147,9 @@ type DuplicateMatch struct {
 }
 
 type CreateResult struct {
-	Lead        *Lead             `json:"lead,omitempty"`
-	Duplicates  []DuplicateMatch  `json:"duplicates,omitempty"`
-	NeedsReview bool              `json:"needsReview"`
+	Lead        *Lead            `json:"lead,omitempty"`
+	Duplicates  []DuplicateMatch `json:"duplicates,omitempty"`
+	NeedsReview bool             `json:"needsReview"`
 }
 
 type BulkAssignInput struct {

@@ -3,6 +3,7 @@ package automation
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -59,6 +60,8 @@ func (e *Executor) runAction(ctx context.Context, auto *Automation, action Actio
 		return e.addTag(ctx, auto, params, resourceType, resourceID)
 	case ActionCreateActivity:
 		return e.createActivity(ctx, auto, params, entityCtx, resourceType, resourceID)
+	case ActionSendEmail:
+		return e.sendEmail(ctx, auto, params, entityCtx, resourceType, resourceID)
 	default:
 		return ActionResult{Type: action.Type, Status: "failed", Error: "unsupported action"}
 	}
@@ -169,7 +172,7 @@ func (e *Executor) sendNotification(ctx context.Context, auto *Automation, p map
 	})
 	return ActionResult{
 		Type: ActionSendNotification, Status: "succeeded",
-		Detail: "Notification recorded for delivery workers",
+		Detail:  "Notification recorded for delivery workers",
 		Payload: map[string]any{"title": title, "message": message, "userId": userID},
 	}
 }
@@ -265,6 +268,148 @@ func (e *Executor) createActivity(ctx context.Context, auto *Automation, p, enti
 	}
 	e.record(ctx, "automation.create_activity", "activity", id, map[string]any{"automationId": auto.ID, "kind": kind})
 	return ActionResult{Type: ActionCreateActivity, Status: "succeeded", Detail: "Activity created", Payload: map[string]any{"activityId": id}}
+}
+
+var templateVar = regexp.MustCompile(`\{\{\s*([a-zA-Z0-9_]+)\s*\}\}`)
+
+func (e *Executor) sendEmail(ctx context.Context, auto *Automation, p, entityCtx map[string]any, resourceType, resourceID string) ActionResult {
+	templateID := strings.TrimSpace(asString(p["templateId"]))
+	if templateID == "" {
+		return ActionResult{Type: ActionSendEmail, Status: "failed", Error: "templateId required"}
+	}
+	var subject, body string
+	err := e.pool.QueryRow(ctx, `
+		SELECT subject, body_html FROM email_templates WHERE id=$1 AND is_active=TRUE
+	`, templateID).Scan(&subject, &body)
+	if err != nil {
+		return ActionResult{Type: ActionSendEmail, Status: "failed", Error: "email template not found"}
+	}
+	to := strings.TrimSpace(asString(entityCtx["email"]))
+	if to == "" {
+		return ActionResult{Type: ActionSendEmail, Status: "failed", Error: "record has no email address"}
+	}
+	owner := strings.TrimSpace(asString(entityCtx["ownerUserId"]))
+	if owner == "" {
+		return ActionResult{Type: ActionSendEmail, Status: "failed", Error: "record has no owner to send from"}
+	}
+	var accountID, fromAddr, fromName string
+	err = e.pool.QueryRow(ctx, `
+		SELECT id::text, email_address, display_name
+		FROM email_accounts
+		WHERE user_id=$1 AND connection_status='connected' AND sending_enabled=TRUE
+		ORDER BY updated_at DESC
+		LIMIT 1
+	`, owner).Scan(&accountID, &fromAddr, &fromName)
+	if err != nil {
+		return ActionResult{Type: ActionSendEmail, Status: "failed", Error: "owner has no connected mailbox"}
+	}
+	vars := e.templateVars(ctx, entityCtx)
+	subject = applyTemplate(subject, vars)
+	body = applyTemplate(body, vars)
+	if unresolved := templateVar.FindString(subject + body); unresolved != "" {
+		return ActionResult{Type: ActionSendEmail, Status: "failed", Error: "template has unresolved variables"}
+	}
+	leadID, dealID, customerID := resolveLinks(resourceType, resourceID, entityCtx)
+	threadID := uuid.NewString()
+	providerThread := "automation-" + threadID
+	now := time.Now().UTC()
+	snippet := subject
+	if len(snippet) > 180 {
+		snippet = snippet[:180]
+	}
+	_, err = e.pool.Exec(ctx, `
+		INSERT INTO email_threads (
+			id, account_id, owner_user_id, provider_thread_id, lead_id, customer_id, deal_id,
+			participants, subject, last_message_at, last_message_preview, message_count, match_status
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,1,'matched')
+	`, threadID, accountID, owner, providerThread, emptyUUID(leadID), emptyUUID(customerID), emptyUUID(dealID),
+		[]string{to}, subject, now, snippet)
+	if err != nil {
+		return ActionResult{Type: ActionSendEmail, Status: "failed", Error: err.Error()}
+	}
+	msgID := uuid.NewString()
+	_, err = e.pool.Exec(ctx, `
+		INSERT INTO email_messages (
+			id, thread_id, account_id, owner_user_id, direction, from_address, from_name,
+			to_addresses, subject, body_html, body_text, snippet, scheduled_at, status
+		) VALUES ($1,$2,$3,$4,'outbound',$5,$6,$7,$8,$9,$10,$11,$12,'scheduled')
+	`, msgID, threadID, accountID, owner, fromAddr, fromName, []string{to}, subject, body, stripHTML(body), snippet, now)
+	if err != nil {
+		return ActionResult{Type: ActionSendEmail, Status: "failed", Error: err.Error()}
+	}
+	e.record(ctx, "automation.send_email", resourceType, resourceID, map[string]any{
+		"automationId": auto.ID, "templateId": templateID, "messageId": msgID, "to": to,
+	})
+	return ActionResult{Type: ActionSendEmail, Status: "succeeded", Detail: "Email queued", Payload: map[string]any{"messageId": msgID}}
+}
+
+func (e *Executor) templateVars(ctx context.Context, entityCtx map[string]any) map[string]string {
+	vars := map[string]string{
+		"full_name":  asString(entityCtx["fullName"]),
+		"email":      asString(entityCtx["email"]),
+		"deal_title": asString(entityCtx["dealTitle"]),
+	}
+	id := asString(entityCtx["customerId"])
+	table := "customers"
+	if id == "" {
+		id = asString(entityCtx["resourceId"])
+		if asString(entityCtx["resourceType"]) == "lead" {
+			table = "leads"
+		} else {
+			id = ""
+		}
+	}
+	if id == "" {
+		return vars
+	}
+	var fullName, email, phone, employer, ownerName *string
+	q := fmt.Sprintf(`
+		SELECT e.full_name, e.email, e.phone, e.employer, u.full_name
+		FROM %s e
+		LEFT JOIN users u ON u.id = e.owner_user_id
+		WHERE e.id=$1
+	`, table)
+	if err := e.pool.QueryRow(ctx, q, id).Scan(&fullName, &email, &phone, &employer, &ownerName); err != nil {
+		return vars
+	}
+	name := derefStr(fullName)
+	first, last := name, ""
+	if i := strings.IndexByte(name, ' '); i > 0 {
+		first, last = name[:i], strings.TrimSpace(name[i+1:])
+	}
+	vars["full_name"] = name
+	vars["first_name"] = first
+	vars["last_name"] = last
+	vars["email"] = derefStr(email)
+	vars["phone"] = derefStr(phone)
+	vars["company_name"] = derefStr(employer)
+	vars["lead_owner"] = derefStr(ownerName)
+	return vars
+}
+
+func applyTemplate(s string, vars map[string]string) string {
+	return templateVar.ReplaceAllStringFunc(s, func(m string) string {
+		sub := templateVar.FindStringSubmatch(m)
+		if len(sub) < 2 {
+			return m
+		}
+		if v, ok := vars[sub[1]]; ok && v != "" {
+			return v
+		}
+		return m
+	})
+}
+
+func stripHTML(s string) string {
+	noTags := regexp.MustCompile(`<[^>]*>`).ReplaceAllString(s, " ")
+	return strings.Join(strings.Fields(noTags), " ")
+}
+
+func derefStr(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 func (e *Executor) record(ctx context.Context, action, resourceType, resourceID string, meta map[string]any) {

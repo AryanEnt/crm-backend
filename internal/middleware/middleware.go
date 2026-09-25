@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -63,14 +64,25 @@ func Recover(next http.Handler) http.Handler {
 	})
 }
 
-// CORS applies Cross-Origin Resource Sharing headers for the given frontend origin.
-func CORS(frontendURL string) func(http.Handler) http.Handler {
+// CORS applies Cross-Origin Resource Sharing for one or more frontend origins.
+// frontendURLs may be a single URL or a comma-separated list.
+func CORS(frontendURLs string) func(http.Handler) http.Handler {
+	allowed := parseOrigins(frontendURLs)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Access-Control-Allow-Origin", frontendURL)
+			origin := r.Header.Get("Origin")
+			if origin != "" {
+				if match, ok := matchOrigin(origin, allowed); ok {
+					w.Header().Set("Access-Control-Allow-Origin", match)
+					w.Header().Set("Vary", "Origin")
+					w.Header().Set("Access-Control-Allow-Credentials", "true")
+				}
+			} else if len(allowed) == 1 {
+				w.Header().Set("Access-Control-Allow-Origin", allowed[0])
+				w.Header().Set("Access-Control-Allow-Credentials", "true")
+			}
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type, X-Request-ID")
-			w.Header().Set("Access-Control-Allow-Credentials", "true")
 			w.Header().Set("Access-Control-Max-Age", "86400")
 
 			if r.Method == http.MethodOptions {
@@ -81,6 +93,35 @@ func CORS(frontendURL string) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+func parseOrigins(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	seen := map[string]struct{}{}
+	for _, p := range parts {
+		o := strings.TrimSpace(p)
+		if o == "" {
+			continue
+		}
+		o = strings.TrimRight(o, "/")
+		if _, ok := seen[o]; ok {
+			continue
+		}
+		seen[o] = struct{}{}
+		out = append(out, o)
+	}
+	return out
+}
+
+func matchOrigin(origin string, allowed []string) (string, bool) {
+	origin = strings.TrimRight(strings.TrimSpace(origin), "/")
+	for _, a := range allowed {
+		if strings.EqualFold(a, origin) {
+			return a, true
+		}
+	}
+	return "", false
 }
 
 // Chain applies middleware in order (first is outermost).

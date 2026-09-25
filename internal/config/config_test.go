@@ -48,3 +48,11 @@ func TestIsDevelopment(t *testing.T) {
 		t.Fatal("expected non-development mode")
 	}
 }
+
+func TestPrimaryFrontendURL(t *testing.T) {
+	t.Parallel()
+	got := primaryFrontendURL("http://localhost:3000, http://10.110.110.77:3000")
+	if got != "http://localhost:3000" {
+		t.Fatalf("got %q", got)
+	}
+}

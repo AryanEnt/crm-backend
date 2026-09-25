@@ -129,6 +129,7 @@ func NewRouter(deps Dependencies) (http.Handler, *automation.Worker, *email.Work
 	activitiesRepo := activities.NewRepository(deps.Pool)
 	activitiesService := activities.NewService(activitiesRepo, auditService, timelineService, automationEmitter, sysActivityService)
 	activitiesHandler := activities.NewHandler(activitiesService)
+	dealsService.SetFollowUps(activitiesService)
 
 	analyticsRepo := analytics.NewRepository(deps.Pool)
 	analyticsService := analytics.NewService(analyticsRepo)
@@ -167,6 +168,8 @@ func NewRouter(deps Dependencies) (http.Handler, *automation.Worker, *email.Work
 	mux.HandleFunc("POST /api/v1/auth/logout", authHandler.Logout)
 	mux.HandleFunc("POST /api/v1/auth/refresh", authHandler.Refresh)
 	mux.Handle("GET /api/v1/auth/me", authMW.Authenticate(http.HandlerFunc(authHandler.Me)))
+	mux.Handle("PATCH /api/v1/auth/me", authMW.Authenticate(http.HandlerFunc(authHandler.UpdateMe)))
+	mux.Handle("POST /api/v1/auth/change-password", authMW.Authenticate(http.HandlerFunc(authHandler.ChangePassword)))
 
 	protect := func(perms []string, h http.HandlerFunc) http.Handler {
 		var stack http.Handler = h
@@ -209,6 +212,7 @@ func NewRouter(deps Dependencies) (http.Handler, *automation.Worker, *email.Work
 	mux.Handle("POST /api/v1/leads/bulk-assign", protect([]string{permissions.LeadsAssign}, leadsHandler.BulkAssign))
 	mux.Handle("POST /api/v1/leads/bulk-stage", protect([]string{permissions.LeadsEdit}, leadsHandler.BulkStage))
 	mux.Handle("POST /api/v1/leads/check-duplicates", protect([]string{permissions.LeadsCreate, permissions.LeadsEdit}, leadsHandler.CheckDuplicates))
+	mux.Handle("POST /api/v1/leads/{id}/qualify", protect([]string{permissions.LeadsEdit}, leadsHandler.Qualify))
 	mux.Handle("POST /api/v1/leads/{id}/convert", protect([]string{permissions.LeadsEdit, permissions.CustomersCreate}, customersHandler.ConvertLead))
 
 	mux.Handle("GET /api/v1/customers", protect([]string{permissions.CustomersView}, customersHandler.List))
@@ -367,6 +371,6 @@ func NewRouter(deps Dependencies) (http.Handler, *automation.Worker, *email.Work
 		middleware.Recover,
 		middleware.RequestID,
 		middleware.Logger,
-		middleware.CORS(deps.Config.FrontendURL),
+		middleware.CORS(deps.Config.CORSOrigins),
 	), autoWorker, emailWorker
 }

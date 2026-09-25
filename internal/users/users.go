@@ -65,13 +65,14 @@ type UpdateInput struct {
 }
 
 type ListFilter struct {
-	Search   string
-	RoleID   string
-	RoleCode string
-	TeamID   string
-	IsActive *bool
-	Limit    int
-	Offset   int
+	Search              string
+	RoleID              string
+	RoleCode            string
+	TeamID              string
+	AvailableForTeamID  string // when set (or "__new__"), exclude SE/TL already on another team
+	IsActive            *bool
+	Limit               int
+	Offset              int
 }
 
 type Repository struct {
@@ -99,6 +100,35 @@ func (r *Repository) List(ctx context.Context, f ListFilter) ([]User, int, error
 	if f.TeamID != "" {
 		args = append(args, f.TeamID)
 		where = append(where, "EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = u.id AND tm.team_id::text = $"+strconv.Itoa(len(args))+")")
+	}
+	if f.AvailableForTeamID != "" {
+		// Exclude Super Admin from team assignment pickers entirely.
+		where = append(where, "r.code <> 'super_admin'")
+		// For SE / Team Lead: allow unassigned users, or members of this team.
+		// AvailableForTeamID == "new" means create-team → unassigned only.
+		exceptID := f.AvailableForTeamID
+		if exceptID == "new" {
+			exceptID = "00000000-0000-0000-0000-000000000000"
+		}
+		args = append(args, exceptID)
+		n := strconv.Itoa(len(args))
+		where = append(where, `
+			(
+				r.code NOT IN ('sales_executive', 'sales_manager')
+				OR NOT EXISTS (
+					SELECT 1 FROM team_members tm
+					WHERE tm.user_id = u.id
+					  AND tm.team_id::text <> $`+n+`
+				)
+				OR (
+					$`+n+` <> '00000000-0000-0000-0000-000000000000'
+					AND EXISTS (
+						SELECT 1 FROM team_members tm
+						WHERE tm.user_id = u.id
+						  AND tm.team_id::text = $`+n+`
+					)
+				)
+			)`)
 	}
 	whereSQL := strings.Join(where, " AND ")
 
@@ -341,21 +371,21 @@ func (r *Repository) RoleCode(ctx context.Context, roleID string) (string, error
 }
 
 type teamInfo struct {
-	ID          string
-	Name        string
-	IsActive    bool
-	OwnerUserID *string
-	OwnerName   *string
+	ID             string
+	Name           string
+	IsActive       bool
+	TeamLeadUserID *string
+	TeamLeadName   *string
 }
 
 func (r *Repository) getTeam(ctx context.Context, teamID string) (*teamInfo, error) {
 	var t teamInfo
 	err := r.pool.QueryRow(ctx, `
-		SELECT t.id::text, t.name, t.is_active, t.owner_user_id::text, u.full_name
+		SELECT t.id::text, t.name, t.is_active, t.team_lead_user_id::text, u.full_name
 		FROM teams t
-		LEFT JOIN users u ON u.id = t.owner_user_id
+		LEFT JOIN users u ON u.id = t.team_lead_user_id
 		WHERE t.id = $1
-	`, teamID).Scan(&t.ID, &t.Name, &t.IsActive, &t.OwnerUserID, &t.OwnerName)
+	`, teamID).Scan(&t.ID, &t.Name, &t.IsActive, &t.TeamLeadUserID, &t.TeamLeadName)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -365,9 +395,9 @@ func (r *Repository) getTeam(ctx context.Context, teamID string) (*teamInfo, err
 	return &t, nil
 }
 
-func (r *Repository) setTeamOwner(ctx context.Context, teamID, userID string) error {
+func (r *Repository) setTeamLead(ctx context.Context, teamID, userID string) error {
 	_, err := r.pool.Exec(ctx, `
-		UPDATE teams SET owner_user_id = $2 WHERE id = $1
+		UPDATE teams SET team_lead_user_id = $2 WHERE id = $1
 	`, teamID, userID)
 	if err != nil {
 		return err
@@ -379,10 +409,10 @@ func (r *Repository) setTeamOwner(ctx context.Context, teamID, userID string) er
 	return err
 }
 
-func (r *Repository) clearTeamOwnerIf(ctx context.Context, teamID, userID string) error {
+func (r *Repository) clearTeamLeadIf(ctx context.Context, teamID, userID string) error {
 	_, err := r.pool.Exec(ctx, `
-		UPDATE teams SET owner_user_id = NULL
-		WHERE id = $1 AND owner_user_id = $2
+		UPDATE teams SET team_lead_user_id = NULL
+		WHERE id = $1 AND team_lead_user_id = $2
 	`, teamID, userID)
 	return err
 }
@@ -482,6 +512,9 @@ func (r *Repository) replaceTeams(ctx context.Context, userID string, teamIDs []
 			INSERT INTO team_members (team_id, user_id) VALUES ($1, $2)
 			ON CONFLICT DO NOTHING
 		`, teamID, userID); err != nil {
+			if msg := membershipConflictMessage(err); msg != "" {
+				return apperrors.Conflict(normalizeUserMembershipConflict(msg))
+			}
 			return err
 		}
 	}
@@ -568,11 +601,11 @@ func (s *Service) Create(ctx context.Context, actorID string, in CreateInput, ip
 
 	if roleCode == permissions.RoleSalesManager && len(teamIDs) == 1 {
 		prev, _ := s.repo.getTeam(ctx, teamIDs[0])
-		if err := s.repo.setTeamOwner(ctx, teamIDs[0], user.ID); err != nil {
+		if err := s.repo.setTeamLead(ctx, teamIDs[0], user.ID); err != nil {
 			return nil, apperrors.Internal("failed to assign team lead", err)
 		}
 		_ = s.audit.Record(ctx, audit.Ptr(actorID), "TEAM_LEAD_ASSIGNED", "team", audit.Ptr(teamIDs[0]), map[string]any{
-			"userId": user.ID, "previousOwnerUserId": prevOwnerID(prev),
+			"userId": user.ID, "previousTeamLeadUserId": prevTeamLeadID(prev),
 		}, ip, ua)
 	}
 
@@ -621,6 +654,10 @@ func (s *Service) Update(ctx context.Context, actorID, id string, in UpdateInput
 	}
 
 	teamIDs, teamsProvided := resolveUpdateTeamIDs(in, current.TeamIDs)
+	if roleCode == permissions.RoleSuperAdmin {
+		teamIDs = nil
+		teamsProvided = true
+	}
 	if teamsProvided || in.RoleID != nil {
 		if err := s.validateRoleTeamAssignment(ctx, roleCode, teamIDs, id); err != nil {
 			return nil, err
@@ -628,10 +665,14 @@ func (s *Service) Update(ctx context.Context, actorID, id string, in UpdateInput
 	}
 
 	teamChanged := teamsProvided && !teamsEqual(current.TeamIDs, teamIDs)
-	if teamChanged && (roleCode == permissions.RoleSalesExecutive || current.RoleCode == permissions.RoleSalesExecutive) && !in.ConfirmTeamChange {
+	if teamChanged && (roleCode == permissions.RoleSalesExecutive || roleCode == permissions.RoleSalesManager) && !in.ConfirmTeamChange {
 		prevName, newName := teamNames(ctx, s.repo, current.TeamIDs, teamIDs)
+		who := "Sales Executive"
+		if roleCode == permissions.RoleSalesManager {
+			who = "Team Lead"
+		}
 		return nil, apperrors.ValidationDetails(
-			"Confirm team change before moving this Sales Executive",
+			"Confirm team change before moving this "+who,
 			map[string]any{
 				"field":            "team_id",
 				"message":          "Team change requires confirmation",
@@ -657,13 +698,13 @@ func (s *Service) Update(ctx context.Context, actorID, id string, in UpdateInput
 
 	if teamChanged {
 		for _, tid := range current.TeamIDs {
-			_ = s.repo.clearTeamOwnerIf(ctx, tid, id)
+			_ = s.repo.clearTeamLeadIf(ctx, tid, id)
 		}
 		if roleCode == permissions.RoleSalesManager && len(teamIDs) == 1 {
 			prev, _ := s.repo.getTeam(ctx, teamIDs[0])
-			_ = s.repo.setTeamOwner(ctx, teamIDs[0], id)
+			_ = s.repo.setTeamLead(ctx, teamIDs[0], id)
 			_ = s.audit.Record(ctx, audit.Ptr(actorID), "TEAM_LEAD_CHANGED", "team", audit.Ptr(teamIDs[0]), map[string]any{
-				"userId": id, "previousOwnerUserId": prevOwnerID(prev),
+				"userId": id, "previousTeamLeadUserId": prevTeamLeadID(prev),
 			}, ip, ua)
 		}
 		_ = s.audit.Record(ctx, audit.Ptr(actorID), "SE_TEAM_CHANGED", "user", audit.Ptr(id), map[string]any{
@@ -673,10 +714,10 @@ func (s *Service) Update(ctx context.Context, actorID, id string, in UpdateInput
 		}, ip, ua)
 	} else if roleCode == permissions.RoleSalesManager && teamsProvided && len(teamIDs) == 1 {
 		prev, _ := s.repo.getTeam(ctx, teamIDs[0])
-		if prev == nil || prev.OwnerUserID == nil || *prev.OwnerUserID != id {
-			_ = s.repo.setTeamOwner(ctx, teamIDs[0], id)
+		if prev == nil || prev.TeamLeadUserID == nil || *prev.TeamLeadUserID != id {
+			_ = s.repo.setTeamLead(ctx, teamIDs[0], id)
 			_ = s.audit.Record(ctx, audit.Ptr(actorID), "TEAM_LEAD_ASSIGNED", "team", audit.Ptr(teamIDs[0]), map[string]any{
-				"userId": id, "previousOwnerUserId": prevOwnerID(prev),
+				"userId": id, "previousTeamLeadUserId": prevTeamLeadID(prev),
 			}, ip, ua)
 		}
 	}
@@ -739,6 +780,12 @@ func (s *Service) ListRoles(ctx context.Context) ([]Role, error) {
 }
 
 func (s *Service) validateRoleTeamAssignment(ctx context.Context, roleCode string, teamIDs []string, excludeUserID string) error {
+	if roleCode == permissions.RoleSuperAdmin {
+		if len(teamIDs) > 0 {
+			return apperrors.Validation("Super Admin is not assigned to a team")
+		}
+		return nil
+	}
 	requiresTeam := roleCode == permissions.RoleSalesExecutive || roleCode == permissions.RoleSalesManager
 	if !requiresTeam {
 		return nil
@@ -751,7 +798,11 @@ func (s *Service) validateRoleTeamAssignment(ctx context.Context, roleCode strin
 		return apperrors.FieldValidation("team_id", msg)
 	}
 	if len(teamIDs) > 1 {
-		return apperrors.FieldValidation("team_id", "Sales roles may belong to exactly one team")
+		msg := "A Sales Executive belongs to exactly one team"
+		if roleCode == permissions.RoleSalesManager {
+			msg = "A Team Lead belongs to exactly one team"
+		}
+		return apperrors.FieldValidation("team_id", msg)
 	}
 	team, err := s.repo.getTeam(ctx, teamIDs[0])
 	if err != nil {
@@ -764,23 +815,23 @@ func (s *Service) validateRoleTeamAssignment(ctx context.Context, roleCode strin
 		return apperrors.FieldValidation("team_id", "Selected team is inactive")
 	}
 	if roleCode == permissions.RoleSalesExecutive {
-		if team.OwnerUserID == nil || *team.OwnerUserID == "" {
+		if team.TeamLeadUserID == nil || *team.TeamLeadUserID == "" {
 			return apperrors.FieldValidation("team_id", "Selected team does not have a Team Lead configured")
 		}
 	}
 	if roleCode == permissions.RoleSalesManager {
-		if team.OwnerUserID != nil && *team.OwnerUserID != "" && *team.OwnerUserID != excludeUserID {
+		if team.TeamLeadUserID != nil && *team.TeamLeadUserID != "" && *team.TeamLeadUserID != excludeUserID {
 			return apperrors.FieldValidation("team_id", "Team already has a Team Lead assigned")
 		}
 	}
 	return nil
 }
 
-func prevOwnerID(t *teamInfo) any {
-	if t == nil || t.OwnerUserID == nil {
+func prevTeamLeadID(t *teamInfo) any {
+	if t == nil || t.TeamLeadUserID == nil {
 		return nil
 	}
-	return *t.OwnerUserID
+	return *t.TeamLeadUserID
 }
 
 func teamNames(ctx context.Context, repo *Repository, prev, next []string) (string, string) {
@@ -812,6 +863,34 @@ func validateCreate(in CreateInput) error {
 		return apperrors.Validation("role is required")
 	}
 	return nil
+}
+
+func membershipConflictMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "already assigned to") && !strings.Contains(msg, "Super Admin cannot") {
+		return ""
+	}
+	if i := strings.Index(msg, "ERROR:"); i >= 0 {
+		msg = strings.TrimSpace(msg[i+len("ERROR:"):])
+	}
+	if i := strings.Index(msg, " (SQLSTATE"); i >= 0 {
+		msg = strings.TrimSpace(msg[:i])
+	}
+	return msg
+}
+
+func normalizeUserMembershipConflict(msg string) string {
+	lower := strings.ToLower(msg)
+	if strings.Contains(lower, "super admin") {
+		return "Super Admin cannot be a team member or Team Lead"
+	}
+	if strings.Contains(lower, "team lead") || strings.Contains(lower, "sales_manager") {
+		return "Team Lead is already assigned to another team."
+	}
+	return "Sales Executive is already assigned to another team."
 }
 
 func isUniqueViolation(err error) bool {

@@ -91,6 +91,51 @@ func (h *Handler) Me(w http.ResponseWriter, r *http.Request) {
 	response.OK(w, user)
 }
 
+func (h *Handler) UpdateMe(w http.ResponseWriter, r *http.Request) {
+	claims, ok := ClaimsFromContext(r.Context())
+	if !ok {
+		response.Fail(w, apperrors.Unauthorized("authentication required"))
+		return
+	}
+	var in UpdateProfileInput
+	if err := validate.DecodeJSON(r, &in); err != nil {
+		response.Fail(w, err)
+		return
+	}
+	user, err := h.service.UpdateProfile(r.Context(), claims.UserID, in)
+	if err != nil {
+		response.Fail(w, err)
+		return
+	}
+	response.OK(w, user)
+}
+
+func (h *Handler) ChangePassword(w http.ResponseWriter, r *http.Request) {
+	claims, ok := ClaimsFromContext(r.Context())
+	if !ok {
+		response.Fail(w, apperrors.Unauthorized("authentication required"))
+		return
+	}
+	var in ChangePasswordInput
+	if err := validate.DecodeJSON(r, &in); err != nil {
+		response.Fail(w, err)
+		return
+	}
+	pair, user, err := h.service.ChangePassword(r.Context(), claims.UserID, in, r.UserAgent(), clientIP(r))
+	if err != nil {
+		response.Fail(w, err)
+		return
+	}
+	SetAuthCookies(w, h.cfg, pair)
+	response.OK(w, authResponse{
+		User:             user,
+		AccessToken:      pair.AccessToken,
+		RefreshToken:     pair.RefreshToken,
+		AccessExpiresAt:  pair.AccessExpiresAt.Format(timeRFC3339),
+		RefreshExpiresAt: pair.RefreshExpiresAt.Format(timeRFC3339),
+	})
+}
+
 func mustAccess(r *http.Request) string {
 	return extractBearer(r)
 }

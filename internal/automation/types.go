@@ -26,6 +26,7 @@ const (
 	CondPriority       = "priority"
 	CondInactivityDays = "inactivity_days"
 	CondDealValue      = "deal_value"
+	CondAttention      = "attention"
 )
 
 // THEN action types.
@@ -37,6 +38,7 @@ const (
 	ActionUpdateField      = "update_field"
 	ActionAddTag           = "add_tag"
 	ActionCreateActivity   = "create_activity"
+	ActionSendEmail        = "send_email"
 )
 
 // Condition operators.
@@ -64,12 +66,13 @@ var AllowedTriggers = []string{
 
 var AllowedConditionFields = []string{
 	CondPipeline, CondStage, CondOwner, CondTeam, CondSource,
-	CondAnzsco, CondPriority, CondInactivityDays, CondDealValue,
+	CondAnzsco, CondPriority, CondInactivityDays, CondDealValue, CondAttention,
 }
 
 var AllowedActions = []string{
 	ActionCreateTask, ActionAssignUser, ActionChangeStage,
 	ActionSendNotification, ActionUpdateField, ActionAddTag, ActionCreateActivity,
+	ActionSendEmail,
 }
 
 // Condition is a single IF clause.

@@ -15,11 +15,12 @@ type Config struct {
 	APIPort       string
 	DatabaseURL   string
 	JWTSecret     string
-	FrontendURL   string
+	FrontendURL   string // primary origin (first FRONTEND_URL) for redirects
+	CORSOrigins   string // comma-separated allowlist for CORS
 	StorageRoot   string
 	StorageDriver string
 	// PublicAPIURL is used for Twilio status callbacks (must be reachable by Twilio).
-	PublicAPIURL string
+	PublicAPIURL       string
 	GoogleClientID     string
 	GoogleClientSecret string
 	GmailPubSubTopic   string
@@ -31,14 +32,16 @@ type Config struct {
 func Load() (*Config, error) {
 	_ = godotenv.Load()
 
+	frontendRaw := getEnv("FRONTEND_URL", "http://localhost:3000")
 	cfg := &Config{
-		AppEnv:        getEnv("APP_ENV", "development"),
-		APIPort:       getEnv("API_PORT", "8080"),
-		DatabaseURL:   os.Getenv("DATABASE_URL"),
-		JWTSecret:     os.Getenv("JWT_SECRET"),
-		FrontendURL:   getEnv("FRONTEND_URL", "http://localhost:3000"),
-		StorageRoot:   getEnv("STORAGE_ROOT", "./storage"),
-		StorageDriver: getEnv("STORAGE_DRIVER", "local"),
+		AppEnv:             getEnv("APP_ENV", "development"),
+		APIPort:            getEnv("API_PORT", "8080"),
+		DatabaseURL:        os.Getenv("DATABASE_URL"),
+		JWTSecret:          os.Getenv("JWT_SECRET"),
+		FrontendURL:        primaryFrontendURL(frontendRaw),
+		CORSOrigins:        frontendRaw,
+		StorageRoot:        getEnv("STORAGE_ROOT", "./storage"),
+		StorageDriver:      getEnv("STORAGE_DRIVER", "local"),
 		PublicAPIURL:       getEnv("PUBLIC_API_URL", "http://localhost:8080"),
 		GoogleClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
 		GoogleClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
@@ -87,4 +90,14 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// primaryFrontendURL returns the first origin from a comma-separated FRONTEND_URL list.
+func primaryFrontendURL(raw string) string {
+	for _, part := range strings.Split(raw, ",") {
+		if o := strings.TrimRight(strings.TrimSpace(part), "/"); o != "" {
+			return o
+		}
+	}
+	return "http://localhost:3000"
 }

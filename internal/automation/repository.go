@@ -9,6 +9,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/crm/backend/internal/attention"
 )
 
 type Repository struct {
@@ -463,14 +465,19 @@ func (r *Repository) LoadEntityContext(ctx context.Context, resourceType, resour
 	switch resourceType {
 	case "lead":
 		var pipelineID, stageID, ownerID, teamID, anzscoID *string
-		var source, priority string
-		var lastAct *time.Time
-		var createdAt time.Time
+		var source, priority, fullName, email, status string
+		var lastAct, nextAct *time.Time
+		var createdAt, updatedAt time.Time
+		var archived bool
+		var slaHours *int
 		err := r.pool.QueryRow(ctx, `
-			SELECT pipeline_id::text, stage_id::text, owner_user_id::text, team_id::text, anzsco_id::text,
-				source, priority, last_activity_at, created_at
-			FROM leads WHERE id=$1
-		`, resourceID).Scan(&pipelineID, &stageID, &ownerID, &teamID, &anzscoID, &source, &priority, &lastAct, &createdAt)
+			SELECT l.pipeline_id::text, l.stage_id::text, l.owner_user_id::text, l.team_id::text, l.anzsco_id::text,
+				l.source, l.priority, l.last_activity_at, l.created_at,
+				l.full_name, COALESCE(l.email,''), l.next_activity_at, l.status, l.is_archived, l.updated_at, ps.sla_hours
+			FROM leads l
+			LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
+			WHERE l.id=$1
+		`, resourceID).Scan(&pipelineID, &stageID, &ownerID, &teamID, &anzscoID, &source, &priority, &lastAct, &createdAt, &fullName, &email, &nextAct, &status, &archived, &updatedAt, &slaHours)
 		if err != nil {
 			return nil, err
 		}
@@ -481,7 +488,18 @@ func (r *Repository) LoadEntityContext(ctx context.Context, resourceType, resour
 		out["anzscoId"] = deref(anzscoID)
 		out["source"] = source
 		out["priority"] = priority
+		out["fullName"] = fullName
+		out["email"] = email
 		out["inactivityDays"] = daysSince(lastAct, createdAt)
+		out["attention"] = attention.Compute(attention.Input{
+			Closed:    archived || status == "converted" || status == "archived" || status == "unqualified",
+			Next:      nextAct,
+			Last:      lastAct,
+			Anchor:    updatedAt,
+			CreatedAt: createdAt,
+			SLAHours:  slaHours,
+			Now:       time.Now().UTC(),
+		})
 		out["tags"] = []string{}
 		var tags []string
 		_ = r.pool.QueryRow(ctx, `SELECT COALESCE(tags,'{}') FROM leads WHERE id=$1`, resourceID).Scan(&tags)
@@ -492,11 +510,15 @@ func (r *Repository) LoadEntityContext(ctx context.Context, resourceType, resour
 		}
 	case "customer":
 		var ownerID, teamID, anzscoID *string
-		var source string
+		var source, fullName, email string
+		var nextFollow, lastContact *time.Time
+		var createdAt time.Time
+		var archived bool
 		err := r.pool.QueryRow(ctx, `
-			SELECT owner_user_id::text, team_id::text, anzsco_id::text, COALESCE(source,'')
+			SELECT owner_user_id::text, team_id::text, anzsco_id::text, COALESCE(source,''),
+				full_name, COALESCE(email,''), next_follow_up_at, last_contacted_at, is_archived, created_at
 			FROM customers WHERE id=$1
-		`, resourceID).Scan(&ownerID, &teamID, &anzscoID, &source)
+		`, resourceID).Scan(&ownerID, &teamID, &anzscoID, &source, &fullName, &email, &nextFollow, &lastContact, &archived, &createdAt)
 		if err != nil {
 			return nil, err
 		}
@@ -504,6 +526,15 @@ func (r *Repository) LoadEntityContext(ctx context.Context, resourceType, resour
 		out["teamId"] = deref(teamID)
 		out["anzscoId"] = deref(anzscoID)
 		out["source"] = source
+		out["fullName"] = fullName
+		out["email"] = email
+		out["attention"] = attention.Compute(attention.Input{
+			Closed:    archived,
+			Next:      nextFollow,
+			Last:      lastContact,
+			CreatedAt: createdAt,
+			Now:       time.Now().UTC(),
+		})
 	case "activity":
 		var leadID, dealID, customerID, ownerID *string
 		err := r.pool.QueryRow(ctx, `
@@ -565,15 +596,26 @@ func (r *Repository) LoadEntityContext(ctx context.Context, resourceType, resour
 // Fix deal LoadEntityContext - I had a bug with customer_id scan. Rewrite that case cleanly.
 func (r *Repository) loadDealContext(ctx context.Context, resourceID string, out map[string]any) error {
 	var pipelineID, stageID, ownerID, teamID, customerID *string
-	var source, priority string
+	var source, priority, title, status, fullName, email string
 	var value *float64
-	var lastAct *time.Time
-	var createdAt time.Time
+	var lastAct, nextAct *time.Time
+	var createdAt, stageEntered time.Time
+	var slaHours *int
 	err := r.pool.QueryRow(ctx, `
-		SELECT pipeline_id::text, stage_id::text, owner_user_id::text, team_id::text, customer_id::text,
-			source, priority, value, last_activity_at, created_at
-		FROM deals WHERE id=$1
-	`, resourceID).Scan(&pipelineID, &stageID, &ownerID, &teamID, &customerID, &source, &priority, &value, &lastAct, &createdAt)
+		SELECT d.pipeline_id::text, d.stage_id::text, d.owner_user_id::text, d.team_id::text, d.customer_id::text,
+			d.source, d.priority, d.value, d.last_activity_at, d.created_at,
+			d.title, d.status, d.next_activity_at, d.stage_entered_at, ps.sla_hours,
+			COALESCE(c.full_name,''), COALESCE(c.email,'')
+		FROM deals d
+		LEFT JOIN pipeline_stages ps ON ps.id = d.stage_id
+		LEFT JOIN customers c ON c.id = d.customer_id
+		WHERE d.id=$1
+	`, resourceID).Scan(
+		&pipelineID, &stageID, &ownerID, &teamID, &customerID,
+		&source, &priority, &value, &lastAct, &createdAt,
+		&title, &status, &nextAct, &stageEntered, &slaHours,
+		&fullName, &email,
+	)
 	if err != nil {
 		return err
 	}
@@ -584,12 +626,28 @@ func (r *Repository) loadDealContext(ctx context.Context, resourceID string, out
 	out["customerId"] = deref(customerID)
 	out["source"] = source
 	out["priority"] = priority
+	out["dealTitle"] = title
+	out["fullName"] = fullName
+	out["email"] = email
 	if value != nil {
 		out["dealValue"] = *value
 	} else {
 		out["dealValue"] = 0.0
 	}
 	out["inactivityDays"] = daysSince(lastAct, createdAt)
+	anchor := stageEntered
+	if anchor.IsZero() {
+		anchor = createdAt
+	}
+	out["attention"] = attention.Compute(attention.Input{
+		Closed:    status != "open",
+		Next:      nextAct,
+		Last:      lastAct,
+		Anchor:    anchor,
+		CreatedAt: createdAt,
+		SLAHours:  slaHours,
+		Now:       time.Now().UTC(),
+	})
 	return nil
 }
 

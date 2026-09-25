@@ -22,12 +22,13 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 	f := ListFilter{
-		Search:   r.URL.Query().Get("q"),
-		RoleID:   r.URL.Query().Get("roleId"),
-		RoleCode: r.URL.Query().Get("roleCode"),
-		TeamID:   firstNonEmpty(r.URL.Query().Get("teamId"), r.URL.Query().Get("team_id")),
-		Limit:    limit,
-		Offset:   offset,
+		Search:             r.URL.Query().Get("q"),
+		RoleID:             r.URL.Query().Get("roleId"),
+		RoleCode:           r.URL.Query().Get("roleCode"),
+		TeamID:             firstNonEmpty(r.URL.Query().Get("teamId"), r.URL.Query().Get("team_id")),
+		AvailableForTeamID: firstNonEmpty(r.URL.Query().Get("availableForTeamId"), r.URL.Query().Get("available_for_team_id")),
+		Limit:              limit,
+		Offset:             offset,
 	}
 	if v := r.URL.Query().Get("isActive"); v == "true" || v == "false" {
 		b := v == "true"

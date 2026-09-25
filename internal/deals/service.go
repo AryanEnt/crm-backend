@@ -6,8 +6,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/crm/backend/internal/activities"
+	"github.com/crm/backend/internal/attention"
 	"github.com/crm/backend/internal/audit"
+	"github.com/crm/backend/internal/auth"
 	"github.com/crm/backend/internal/automation"
+	"github.com/crm/backend/internal/permissions"
 	"github.com/crm/backend/internal/pipelines"
 	"github.com/crm/backend/internal/systemactivity"
 	"github.com/crm/backend/internal/timeline"
@@ -21,10 +25,19 @@ type Service struct {
 	hooks       *automation.Emitter
 	timeline    *timeline.Service
 	sysActivity *systemactivity.Service
+	followups   FollowUpScheduler
 }
 
 func NewService(repo *Repository, pipelinesSvc *pipelines.Service, auditSvc *audit.Service, hooks *automation.Emitter, timelineSvc *timeline.Service, sysActivity *systemactivity.Service) *Service {
 	return &Service{repo: repo, pipelines: pipelinesSvc, audit: auditSvc, hooks: hooks, timeline: timelineSvc, sysActivity: sysActivity}
+}
+
+type FollowUpScheduler interface {
+	ScheduleFollowUp(ctx context.Context, actorID string, in activities.FollowUpRequest, ip, ua string) (string, error)
+}
+
+func (s *Service) SetFollowUps(sc FollowUpScheduler) {
+	s.followups = sc
 }
 
 func (s *Service) recordSystemActivity(ctx context.Context, in systemactivity.WriteInput) {
@@ -34,6 +47,9 @@ func (s *Service) recordSystemActivity(ctx context.Context, in systemactivity.Wr
 }
 
 func (s *Service) List(ctx context.Context, f ListFilter) ([]Deal, int, error) {
+	if !attention.ValidCode(f.Attention) {
+		return nil, 0, apperrors.Validation("invalid attention")
+	}
 	items, total, err := s.repo.List(ctx, f)
 	if err != nil {
 		return nil, 0, apperrors.Internal("failed to list deals", err)
@@ -86,12 +102,12 @@ func (s *Service) GetDetail(ctx context.Context, id string) (*DealDetail, error)
 	}, nil
 }
 
-func (s *Service) Board(ctx context.Context, pipelineID string) (*Board, error) {
-	pipe, err := s.pipelines.Get(ctx, pipelineID)
+func (s *Service) Board(ctx context.Context, f ListFilter) (*Board, error) {
+	pipe, err := s.pipelines.Get(ctx, f.PipelineID)
 	if err != nil {
 		return nil, err
 	}
-	deals, err := s.repo.Board(ctx, pipelineID)
+	deals, err := s.repo.Board(ctx, f)
 	if err != nil {
 		return nil, apperrors.Internal("failed to load board", err)
 	}
@@ -225,9 +241,13 @@ func (s *Service) Update(ctx context.Context, actorID, id string, in UpdateInput
 	return d, nil
 }
 
-func (s *Service) Move(ctx context.Context, actorID, id string, in MoveInput, ip, ua string) (*Deal, error) {
+func (s *Service) Move(ctx context.Context, claims auth.Claims, id string, in MoveInput, ip, ua string) (*MoveResult, error) {
+	actorID := claims.UserID
 	deal, err := s.Get(ctx, id)
 	if err != nil {
+		return nil, err
+	}
+	if err := assertDealMoveAllowed(claims, deal); err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(in.StageID) == "" {
@@ -259,7 +279,7 @@ func (s *Service) Move(ctx context.Context, actorID, id string, in MoveInput, ip
 	}
 
 	if deal.StageID != nil && *deal.StageID == in.StageID {
-		return deal, nil
+		return &MoveResult{Deal: deal}, nil
 	}
 
 	if !in.Force {
@@ -322,7 +342,78 @@ func (s *Service) Move(ctx context.Context, actorID, id string, in MoveInput, ip
 			Metadata: map[string]any{"event": automation.EventDealStageChanged, "toStageId": in.StageID},
 		})
 	}
-	return d, nil
+	return s.finishMove(ctx, actorID, d, in, ip, ua)
+}
+
+func (s *Service) finishMove(ctx context.Context, actorID string, d *Deal, in MoveInput, ip, ua string) (*MoveResult, error) {
+	var nextID *string
+	if d.Status == "open" && in.NextActivity != nil && strings.TrimSpace(in.NextActivity.DueAt) != "" && s.followups != nil {
+		id, err := s.followups.ScheduleFollowUp(ctx, actorID, activities.FollowUpRequest{
+			Next:       *in.NextActivity,
+			CustomerID: &d.CustomerID,
+			DealID:     &d.ID,
+		}, ip, ua)
+		if err == nil {
+			nextID = &id
+			if fresh, ferr := s.Get(ctx, d.ID); ferr == nil && fresh != nil {
+				d = fresh
+			}
+		}
+	}
+	needs := d.Status == "open" && (d.NextActivityAt == nil || !d.NextActivityAt.After(time.Now().UTC()))
+	return &MoveResult{Deal: d, NeedsNextActivity: needs, NextActivityID: nextID}, nil
+}
+
+type MoveResult struct {
+	*Deal
+	NeedsNextActivity bool    `json:"needsNextActivity"`
+	NextActivityID    *string `json:"nextActivityId,omitempty"`
+}
+
+// assertDealMoveAllowed enforces deals:edit data scope on a single deal move.
+func assertDealMoveAllowed(claims auth.Claims, deal *Deal) error {
+	scope := permissions.ScopeFor(claims.PermissionScopes, permissions.DealsEdit)
+	if scope == "" {
+		if !permissions.ExpandImplies(claims.Permissions).Has(permissions.DealsEdit) {
+			return apperrors.Forbidden("missing permission")
+		}
+		switch claims.RoleCode {
+		case permissions.RoleSuperAdmin:
+			scope = permissions.ScopeOrganization
+		case permissions.RoleSalesManager:
+			scope = permissions.ScopeTeam
+		default:
+			scope = permissions.ScopeOwn
+		}
+	}
+	switch scope {
+	case permissions.ScopeOrganization:
+		return nil
+	case permissions.ScopeTeam:
+		if deal.TeamID != nil {
+			for _, tid := range claims.TeamIDs {
+				if tid == *deal.TeamID {
+					return nil
+				}
+			}
+		}
+		if deal.OwnerUserID != nil {
+			for _, uid := range claims.TeamMemberUserIDs {
+				if uid == *deal.OwnerUserID {
+					return nil
+				}
+			}
+			if *deal.OwnerUserID == claims.UserID {
+				return nil
+			}
+		}
+		return apperrors.Forbidden("deal is outside your team scope")
+	default: // own
+		if deal.OwnerUserID != nil && *deal.OwnerUserID == claims.UserID {
+			return nil
+		}
+		return apperrors.Forbidden("can only move your own deals")
+	}
 }
 
 func missingRequiredFields(deal *Deal, fields []string) []string {
