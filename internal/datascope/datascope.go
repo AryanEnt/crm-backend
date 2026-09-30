@@ -16,22 +16,53 @@ type Visibility struct {
 	TeamIDs  []string
 }
 
+// EffectiveScope returns the caller's data scope for a view permission, falling
+// back to role defaults when the grant carries no explicit scope.
+func EffectiveScope(claims auth.Claims, viewPermission string) (permissions.Scope, error) {
+	scope := permissions.ScopeFor(claims.PermissionScopes, viewPermission)
+	if scope != "" {
+		return scope, nil
+	}
+	perms := permissions.ExpandImplies(claims.Permissions)
+	if !perms.Has(viewPermission) {
+		return "", apperrors.Forbidden("missing permission")
+	}
+	switch claims.RoleCode {
+	case permissions.RoleSuperAdmin:
+		return permissions.ScopeOrganization, nil
+	case permissions.RoleSalesManager:
+		return permissions.ScopeTeam, nil
+	default:
+		return permissions.ScopeOwn, nil
+	}
+}
+
+// WidestScope is EffectiveScope across routes that accept any of several permissions;
+// it fails only when the caller holds none of them.
+func WidestScope(claims auth.Claims, codes ...string) (permissions.Scope, error) {
+	var widest permissions.Scope
+	var firstErr error
+	for _, code := range codes {
+		scope, err := EffectiveScope(claims, code)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		widest = permissions.WidenScope(widest, scope)
+	}
+	if widest == "" {
+		return "", firstErr
+	}
+	return widest, nil
+}
+
 // Resolve builds visibility for a view permission and optional sales_executive_id filter.
 func Resolve(claims auth.Claims, viewPermission string, salesExecutiveID string) (Visibility, error) {
-	scope := permissions.ScopeFor(claims.PermissionScopes, viewPermission)
-	if scope == "" {
-		perms := permissions.ExpandImplies(claims.Permissions)
-		if !perms.Has(viewPermission) {
-			return Visibility{}, apperrors.Forbidden("missing permission")
-		}
-		switch claims.RoleCode {
-		case permissions.RoleSuperAdmin:
-			scope = permissions.ScopeOrganization
-		case permissions.RoleSalesManager:
-			scope = permissions.ScopeTeam
-		default:
-			scope = permissions.ScopeOwn
-		}
+	scope, err := EffectiveScope(claims, viewPermission)
+	if err != nil {
+		return Visibility{}, err
 	}
 
 	seID := strings.TrimSpace(salesExecutiveID)
@@ -48,7 +79,7 @@ func Resolve(claims auth.Claims, viewPermission string, salesExecutiveID string)
 
 	case permissions.ScopeTeam:
 		if len(claims.TeamIDs) == 0 {
-			v.OwnerIDs = []string{"00000000-0000-0000-0000-000000000000"}
+			v.OwnerIDs = []string{noMatchID}
 			return v, nil
 		}
 		v.TeamIDs = append([]string{}, claims.TeamIDs...)
@@ -66,6 +97,67 @@ func Resolve(claims auth.Claims, viewPermission string, salesExecutiveID string)
 		}
 		v.OwnerIDs = []string{claims.UserID}
 		return v, nil
+	}
+}
+
+// ReportScope is the clamped team/owner filter for aggregate reporting queries,
+// which filter by at most one team and one owner.
+type ReportScope struct {
+	Scope       permissions.Scope
+	TeamID      string
+	OwnerUserID string
+	// UserIDs and TeamIDs bound per-user and per-team breakdown rows.
+	// nil means unrestricted; an empty slice means no rows.
+	UserIDs []string
+	TeamIDs []string
+}
+
+const noMatchID = "00000000-0000-0000-0000-000000000000"
+
+// ResolveReport clamps requested teamId/ownerUserId filters to the caller's scope.
+// Own scope is pinned to the caller; team scope is pinned to one of the caller's
+// teams (the first, when none is requested). Out-of-scope requests are forbidden.
+func ResolveReport(claims auth.Claims, viewPermission, teamID, ownerUserID string) (ReportScope, error) {
+	scope, err := EffectiveScope(claims, viewPermission)
+	if err != nil {
+		return ReportScope{}, err
+	}
+	teamID = strings.TrimSpace(teamID)
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	rs := ReportScope{Scope: scope, TeamID: teamID, OwnerUserID: ownerUserID}
+
+	switch scope {
+	case permissions.ScopeOrganization:
+		return rs, nil
+
+	case permissions.ScopeTeam:
+		if len(claims.TeamIDs) == 0 {
+			rs.TeamID = ""
+			rs.OwnerUserID = noMatchID
+			rs.UserIDs = []string{}
+			rs.TeamIDs = []string{}
+			return rs, nil
+		}
+		if teamID == "" {
+			rs.TeamID = claims.TeamIDs[0]
+		} else if !contains(claims.TeamIDs, teamID) {
+			return ReportScope{}, apperrors.Forbidden("requested team is outside your scope")
+		}
+		if ownerUserID != "" && ownerUserID != claims.UserID && !contains(claims.TeamMemberUserIDs, ownerUserID) {
+			return ReportScope{}, apperrors.Forbidden("requested owner is outside your scope")
+		}
+		rs.UserIDs = append([]string{claims.UserID}, claims.TeamMemberUserIDs...)
+		rs.TeamIDs = []string{rs.TeamID}
+		return rs, nil
+
+	default: // own
+		if ownerUserID != "" && ownerUserID != claims.UserID {
+			return ReportScope{}, apperrors.Forbidden("requested owner is outside your scope")
+		}
+		rs.OwnerUserID = claims.UserID
+		rs.UserIDs = []string{claims.UserID}
+		rs.TeamIDs = []string{}
+		return rs, nil
 	}
 }
 

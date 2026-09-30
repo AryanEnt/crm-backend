@@ -425,6 +425,7 @@ func (r *Repository) TeamAnalytics(ctx context.Context, f Filter) (*TeamAnalytic
 					AND ($6 = '' OR d.owner_user_id::text = $6)
 					AND ($5 = '' OR EXISTS (SELECT 1 FROM customers c WHERE c.id=d.customer_id AND c.anzsco_id::text=$5))
 				))
+				AND ($7::text[] IS NULL OR t.id::text = ANY($7::text[]))
 				GROUP BY t.id, t.name
 			)
 			SELECT entity_id, entity_name, lead_volume, deals, won_deals, activities, pipeline_value,
@@ -438,7 +439,7 @@ func (r *Repository) TeamAnalytics(ctx context.Context, f Filter) (*TeamAnalytic
 			ORDER BY %s %s NULLS LAST
 			LIMIT 50
 		`, orderExpr, dir)
-		rows, err := r.pool.Query(ctx, q, f.From, f.To, f.PipelineID, f.Source, f.AnzscoID, f.OwnerUserID)
+		rows, err := r.pool.Query(ctx, q, f.From, f.To, f.PipelineID, f.Source, f.AnzscoID, f.OwnerUserID, textArray(f.ScopeTeamIDs))
 		if err != nil {
 			return nil, err
 		}
@@ -513,7 +514,9 @@ func (r *Repository) TeamAnalytics(ctx context.Context, f Filter) (*TeamAnalytic
 				(SELECT AVG(tr.duration_seconds)::float8 FROM deal_stage_transitions tr
 					JOIN deals dx ON dx.id=tr.deal_id
 					WHERE dx.pipeline_id = p.id AND tr.from_stage_id IS NOT NULL
-					  AND tr.exited_at >= $1 AND tr.exited_at <= $2 AND tr.duration_seconds > 0)
+					  AND tr.exited_at >= $1 AND tr.exited_at <= $2 AND tr.duration_seconds > 0
+					  AND ($3 = '' OR dx.team_id::text = $3)
+					  AND ($4 = '' OR dx.owner_user_id::text = $4))
 			FROM deals d
 			LEFT JOIN pipelines p ON p.id = d.pipeline_id
 			LEFT JOIN customers c ON c.id = d.customer_id
@@ -583,6 +586,7 @@ func (r *Repository) TeamAnalytics(ctx context.Context, f Filter) (*TeamAnalytic
 				AND ($6='' OR c.anzsco_id::text=$6)
 			))
 			AND (u.id IS NULL OR u.is_active = TRUE)
+			AND ($7::text[] IS NULL OR u.id::text = ANY($7::text[]))
 			GROUP BY u.id, u.full_name
 			HAVING COUNT(d.*) > 0 OR (
 				SELECT COUNT(*) FROM leads l WHERE l.owner_user_id = u.id
@@ -591,7 +595,7 @@ func (r *Repository) TeamAnalytics(ctx context.Context, f Filter) (*TeamAnalytic
 			ORDER BY %s %s NULLS LAST
 			LIMIT 50
 		`, mapUserOrder(orderExpr), dir)
-		rows, err := r.pool.Query(ctx, q, f.From, f.To, f.PipelineID, f.TeamID, f.Source, f.AnzscoID)
+		rows, err := r.pool.Query(ctx, q, f.From, f.To, f.PipelineID, f.TeamID, f.Source, f.AnzscoID, textArray(f.ScopeUserIDs))
 		if err != nil {
 			return nil, err
 		}

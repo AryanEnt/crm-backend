@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/crm/backend/internal/auth"
+	"github.com/crm/backend/internal/datascope"
+	"github.com/crm/backend/internal/permissions"
 	"github.com/crm/backend/pkg/apperrors"
 	"github.com/crm/backend/pkg/response"
 	"github.com/crm/backend/pkg/validate"
@@ -25,7 +27,15 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	offset, _ := strconv.Atoi(q.Get("offset"))
+	claims, _ := auth.ClaimsFromContext(r.Context())
+	vis, err := datascope.Resolve(claims, permissions.DocumentsView, "")
+	if err != nil {
+		response.Fail(w, err)
+		return
+	}
 	items, total, err := h.service.List(r.Context(), ListFilter{
+		Scope:      vis,
+		Viewer:     claims,
 		CustomerID: q.Get("customerId"),
 		DealID:     q.Get("dealId"),
 		LeadID:     q.Get("leadId"),
@@ -68,6 +78,10 @@ func (h *Handler) Request(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claims, _ := auth.ClaimsFromContext(r.Context())
+	if err := h.requireParents(r, claims, in.LeadID, in.CustomerID, in.DealID); err != nil {
+		response.Fail(w, err)
+		return
+	}
 	d, err := h.service.Request(r.Context(), claims.UserID, in, clientIP(r), r.UserAgent())
 	if err != nil {
 		response.Fail(w, err)
@@ -100,6 +114,10 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if docID != "" {
+		if err := datascope.RequireRecord(r.Context(), h.service.repo.pool, claims, datascope.Documents, docID, permissions.DocumentsCreate); err != nil {
+			response.Fail(w, err)
+			return
+		}
 		d, err := h.service.UploadToExisting(r.Context(), claims.UserID, docID, filename, mime, header.Size, file, clientIP(r), r.UserAgent())
 		if err != nil {
 			response.Fail(w, err)
@@ -132,12 +150,34 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 		expires = &v
 	}
 	notes := r.FormValue("notes")
+	if err := h.requireParents(r, claims, leadID, customerID, dealID); err != nil {
+		response.Fail(w, err)
+		return
+	}
 	d, err := h.service.UploadNew(r.Context(), claims.UserID, name, docType, category, leadID, customerID, dealID, expires, notes, filename, mime, header.Size, file, clientIP(r), r.UserAgent())
 	if err != nil {
 		response.Fail(w, err)
 		return
 	}
 	response.Created(w, d)
+}
+
+// requireParents 404s when a document would be attached to a lead, customer or deal
+// the caller can't see.
+func (h *Handler) requireParents(r *http.Request, claims auth.Claims, leadID, customerID, dealID *string) error {
+	parents := []struct {
+		id  *string
+		rec datascope.Record
+	}{{leadID, datascope.Leads}, {customerID, datascope.Customers}, {dealID, datascope.Deals}}
+	for _, p := range parents {
+		if p.id == nil || strings.TrimSpace(*p.id) == "" {
+			continue
+		}
+		if err := datascope.RequireRecord(r.Context(), h.service.repo.pool, claims, p.rec, strings.TrimSpace(*p.id), permissions.DocumentsCreate); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (h *Handler) Download(w http.ResponseWriter, r *http.Request) {

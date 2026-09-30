@@ -2,6 +2,7 @@ package leads
 
 import (
 	"net/http"
+	"slices"
 	"strconv"
 
 	"github.com/crm/backend/internal/auth"
@@ -133,6 +134,10 @@ func (h *Handler) BulkArchive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claims, _ := auth.ClaimsFromContext(r.Context())
+	if err := h.requireLeads(r, claims, in.IDs, permissions.LeadsDelete); err != nil {
+		response.Fail(w, err)
+		return
+	}
 	n, err := h.service.Archive(r.Context(), claims.UserID, in.IDs, in.Archive, clientIP(r), r.UserAgent())
 	if err != nil {
 		response.Fail(w, err)
@@ -148,6 +153,14 @@ func (h *Handler) BulkAssign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claims, _ := auth.ClaimsFromContext(r.Context())
+	if err := h.requireLeads(r, claims, in.IDs, permissions.LeadsAssign); err != nil {
+		response.Fail(w, err)
+		return
+	}
+	if err := assignTargetInScope(claims, deref(in.OwnerUserID), deref(in.TeamID)); err != nil {
+		response.Fail(w, err)
+		return
+	}
 	n, err := h.service.BulkAssign(r.Context(), claims.UserID, in, clientIP(r), r.UserAgent())
 	if err != nil {
 		response.Fail(w, err)
@@ -163,6 +176,10 @@ func (h *Handler) BulkStage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claims, _ := auth.ClaimsFromContext(r.Context())
+	if err := h.requireLeads(r, claims, in.IDs, permissions.LeadsEdit); err != nil {
+		response.Fail(w, err)
+		return
+	}
 	n, err := h.service.BulkStage(r.Context(), claims.UserID, in, clientIP(r), r.UserAgent())
 	if err != nil {
 		response.Fail(w, err)
@@ -205,6 +222,38 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// requireLeads rejects the whole batch if any id is outside the caller's scope for perm.
+func (h *Handler) requireLeads(r *http.Request, claims auth.Claims, ids []string, perm string) error {
+	return datascope.RequireRecords(r.Context(), h.service.repo.pool, claims, datascope.Leads, ids, perm)
+}
+
+// assignTargetInScope keeps non-organization callers from handing leads to people
+// or teams outside their own scope.
+func assignTargetInScope(claims auth.Claims, ownerUserID, teamID string) error {
+	scope, err := datascope.EffectiveScope(claims, permissions.LeadsAssign)
+	if err != nil {
+		return err
+	}
+	if scope == permissions.ScopeOrganization {
+		return nil
+	}
+	if ownerUserID != "" && ownerUserID != claims.UserID &&
+		(scope != permissions.ScopeTeam || !slices.Contains(claims.TeamMemberUserIDs, ownerUserID)) {
+		return apperrors.Forbidden("You can only assign leads to people on your team")
+	}
+	if teamID != "" && !slices.Contains(claims.TeamIDs, teamID) {
+		return apperrors.Forbidden("You can only assign leads to your own team")
+	}
+	return nil
+}
+
+func deref(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 func (h *Handler) applyListScope(r *http.Request, f *ListFilter, seID string) error {

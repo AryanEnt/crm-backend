@@ -85,6 +85,14 @@ func (s *Service) ListPartners(ctx context.Context, q string) ([]Partner, error)
 	return items, nil
 }
 
+func (s *Service) ListReferrerUsers(ctx context.Context, q string) ([]ReferrerUser, error) {
+	items, err := s.repo.ListReferrerUsers(ctx, strings.TrimSpace(q), 20)
+	if err != nil {
+		return nil, apperrors.Internal("failed to list referrer users", err)
+	}
+	return items, nil
+}
+
 func (s *Service) CreatePartner(ctx context.Context, actorID string, in CreatePartnerInput, ip, ua string) (*Partner, error) {
 	if strings.TrimSpace(in.Name) == "" {
 		return nil, apperrors.Validation("partner name is required")

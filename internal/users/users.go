@@ -73,6 +73,8 @@ type ListFilter struct {
 	IsActive            *bool
 	Limit               int
 	Offset              int
+	// Access bounds the rows returned; the zero value returns none.
+	Access Access
 }
 
 type Repository struct {
@@ -82,6 +84,8 @@ type Repository struct {
 func NewRepository(pool *pgxpool.Pool) *Repository {
 	return &Repository{pool: pool}
 }
+
+const noUserID = "00000000-0000-0000-0000-000000000000"
 
 func (r *Repository) List(ctx context.Context, f ListFilter) ([]User, int, error) {
 	if f.Limit <= 0 || f.Limit > 100 {
@@ -93,6 +97,19 @@ func (r *Repository) List(ctx context.Context, f ListFilter) ([]User, int, error
 		"($3 = '' OR r.code = $3)",
 	}
 	args := []any{f.Search, f.RoleID, f.RoleCode}
+	if !f.Access.organization() {
+		teamIDs := []string{}
+		if f.Access.Scope == permissions.ScopeTeam {
+			teamIDs = append(teamIDs, f.Access.TeamIDs...)
+		}
+		selfID := f.Access.UserID
+		if selfID == "" {
+			selfID = noUserID
+		}
+		args = append(args, selfID, teamIDs)
+		self, teams := strconv.Itoa(len(args)-1), strconv.Itoa(len(args))
+		where = append(where, "(u.id::text = $"+self+" OR EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = u.id AND tm.team_id = ANY($"+teams+"::uuid[])))")
+	}
 	if f.IsActive != nil {
 		args = append(args, *f.IsActive)
 		where = append(where, "u.is_active = $"+strconv.Itoa(len(args)))
@@ -553,11 +570,35 @@ func NewService(repo *Repository, hasher *auth.BcryptHasher, auditSvc *audit.Ser
 	return &Service{repo: repo, hasher: hasher, audit: auditSvc, sess: sess}
 }
 
-func (s *Service) List(ctx context.Context, f ListFilter) ([]User, int, error) {
-	return s.repo.List(ctx, f)
+func (s *Service) List(ctx context.Context, claims auth.Claims, f ListFilter) ([]User, int, error) {
+	access, err := accessFor(claims, permissions.UsersView)
+	if err != nil {
+		return nil, 0, err
+	}
+	f.Access = access
+	items, total, err := s.repo.List(ctx, f)
+	if err != nil {
+		return nil, 0, apperrors.Internal("failed to list users", err)
+	}
+	return items, total, nil
 }
 
-func (s *Service) Get(ctx context.Context, id string) (*User, error) {
+func (s *Service) Get(ctx context.Context, claims auth.Claims, id string) (*User, error) {
+	access, err := accessFor(claims, permissions.UsersView)
+	if err != nil {
+		return nil, err
+	}
+	u, err := s.load(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if !access.CanSee(u) {
+		return nil, apperrors.NotFound("user not found")
+	}
+	return u, nil
+}
+
+func (s *Service) load(ctx context.Context, id string) (*User, error) {
 	u, err := s.repo.Get(ctx, id)
 	if err != nil {
 		return nil, apperrors.Internal("failed to load user", err)
@@ -568,7 +609,12 @@ func (s *Service) Get(ctx context.Context, id string) (*User, error) {
 	return u, nil
 }
 
-func (s *Service) Create(ctx context.Context, actorID string, in CreateInput, ip, ua string) (*User, error) {
+func (s *Service) Create(ctx context.Context, claims auth.Claims, in CreateInput, ip, ua string) (*User, error) {
+	access, err := accessFor(claims, permissions.UsersCreate)
+	if err != nil {
+		return nil, err
+	}
+	actorID := claims.UserID
 	if err := validateCreate(in); err != nil {
 		return nil, err
 	}
@@ -580,7 +626,10 @@ func (s *Service) Create(ctx context.Context, actorID string, in CreateInput, ip
 		return nil, apperrors.Validation("invalid role")
 	}
 
-	teamIDs := normalizeTeamIDs(in)
+	teamIDs, err := access.ResolveCreateTeams(roleCode, normalizeTeamIDs(in))
+	if err != nil {
+		return nil, err
+	}
 	in.TeamIDs = teamIDs
 	in.TeamID = ""
 	if err := s.validateRoleTeamAssignment(ctx, roleCode, teamIDs, ""); err != nil {
@@ -618,13 +667,24 @@ func (s *Service) Create(ctx context.Context, actorID string, in CreateInput, ip
 	return user, nil
 }
 
-func (s *Service) Update(ctx context.Context, actorID, id string, in UpdateInput, ip, ua string) (*User, error) {
-	current, err := s.repo.Get(ctx, id)
+func (s *Service) Update(ctx context.Context, claims auth.Claims, id string, in UpdateInput, ip, ua string) (*User, error) {
+	access, err := accessFor(claims, permissions.UsersEdit, permissions.UsersAssign)
 	if err != nil {
-		return nil, apperrors.Internal("failed to load user", err)
+		return nil, err
 	}
-	if current == nil {
-		return nil, apperrors.NotFound("user not found")
+	actorID := claims.UserID
+	current, err := s.load(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if in.IsActive != nil && *in.IsActive != current.IsActive {
+		statusAccess, err := accessFor(claims, permissions.UsersDelete)
+		if err != nil {
+			return nil, apperrors.Forbidden("You don't have permission to activate or deactivate users")
+		}
+		if err := statusAccess.requireManage(current); err != nil {
+			return nil, err
+		}
 	}
 
 	var hash *string
@@ -654,6 +714,9 @@ func (s *Service) Update(ctx context.Context, actorID, id string, in UpdateInput
 	}
 
 	teamIDs, teamsProvided := resolveUpdateTeamIDs(in, current.TeamIDs)
+	if err := access.AuthorizeUpdate(current, in, teamIDs, teamsProvided); err != nil {
+		return nil, err
+	}
 	if roleCode == permissions.RoleSuperAdmin {
 		teamIDs = nil
 		teamsProvided = true
@@ -731,7 +794,19 @@ func (s *Service) Update(ctx context.Context, actorID, id string, in UpdateInput
 	return user, nil
 }
 
-func (s *Service) SetActive(ctx context.Context, actorID, id string, active bool, ip, ua string) (*User, error) {
+func (s *Service) SetActive(ctx context.Context, claims auth.Claims, id string, active bool, ip, ua string) (*User, error) {
+	access, err := accessFor(claims, permissions.UsersDelete)
+	if err != nil {
+		return nil, err
+	}
+	actorID := claims.UserID
+	current, err := s.load(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := access.requireManage(current); err != nil {
+		return nil, err
+	}
 	user, err := s.repo.SetActive(ctx, id, active)
 	if err != nil {
 		return nil, apperrors.Internal("failed to update user status", err)
@@ -750,7 +825,23 @@ func (s *Service) SetActive(ctx context.Context, actorID, id string, active bool
 	return user, nil
 }
 
-func (s *Service) BulkSetActive(ctx context.Context, actorID string, ids []string, active bool, ip, ua string) (int, error) {
+func (s *Service) BulkSetActive(ctx context.Context, claims auth.Claims, ids []string, active bool, ip, ua string) (int, error) {
+	access, err := accessFor(claims, permissions.UsersDelete)
+	if err != nil {
+		return 0, err
+	}
+	actorID := claims.UserID
+	if !access.organization() {
+		for _, id := range ids {
+			current, err := s.load(ctx, id)
+			if err != nil {
+				return 0, err
+			}
+			if err := access.requireManage(current); err != nil {
+				return 0, err
+			}
+		}
+	}
 	n, err := s.repo.BulkSetActive(ctx, ids, active)
 	if err != nil {
 		return 0, apperrors.Internal("failed to update users", err)

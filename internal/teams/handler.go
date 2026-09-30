@@ -5,7 +5,6 @@ import (
 	"strconv"
 
 	"github.com/crm/backend/internal/auth"
-	"github.com/crm/backend/pkg/apperrors"
 	"github.com/crm/backend/pkg/response"
 	"github.com/crm/backend/pkg/validate"
 )
@@ -26,9 +25,10 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		b := v == "true"
 		f.IsActive = &b
 	}
-	items, total, err := h.service.List(r.Context(), f)
+	claims, _ := auth.ClaimsFromContext(r.Context())
+	items, total, err := h.service.List(r.Context(), claims, f)
 	if err != nil {
-		response.Fail(w, apperrors.Internal("failed to list teams", err))
+		response.Fail(w, err)
 		return
 	}
 	response.JSON(w, http.StatusOK, response.Envelope{
@@ -39,7 +39,8 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
-	team, err := h.service.Get(r.Context(), r.PathValue("id"))
+	claims, _ := auth.ClaimsFromContext(r.Context())
+	team, err := h.service.Get(r.Context(), claims, r.PathValue("id"))
 	if err != nil {
 		response.Fail(w, err)
 		return
@@ -54,7 +55,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claims, _ := auth.ClaimsFromContext(r.Context())
-	team, err := h.service.Create(r.Context(), claims.UserID, in, clientIP(r), r.UserAgent())
+	team, err := h.service.Create(r.Context(), claims, in, clientIP(r), r.UserAgent())
 	if err != nil {
 		response.Fail(w, err)
 		return
@@ -69,7 +70,7 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claims, _ := auth.ClaimsFromContext(r.Context())
-	team, err := h.service.Update(r.Context(), claims.UserID, r.PathValue("id"), in, clientIP(r), r.UserAgent())
+	team, err := h.service.Update(r.Context(), claims, r.PathValue("id"), in, clientIP(r), r.UserAgent())
 	if err != nil {
 		response.Fail(w, err)
 		return
@@ -88,7 +89,7 @@ func (h *Handler) SetStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claims, _ := auth.ClaimsFromContext(r.Context())
-	team, err := h.service.SetActive(r.Context(), claims.UserID, r.PathValue("id"), in.IsActive, clientIP(r), r.UserAgent())
+	team, err := h.service.SetActive(r.Context(), claims, r.PathValue("id"), in.IsActive, clientIP(r), r.UserAgent())
 	if err != nil {
 		response.Fail(w, err)
 		return

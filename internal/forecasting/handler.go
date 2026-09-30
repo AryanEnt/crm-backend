@@ -3,6 +3,10 @@ package forecasting
 import (
 	"net/http"
 
+	"github.com/crm/backend/internal/auth"
+	"github.com/crm/backend/internal/datascope"
+	"github.com/crm/backend/internal/permissions"
+	"github.com/crm/backend/pkg/apperrors"
 	"github.com/crm/backend/pkg/response"
 )
 
@@ -24,6 +28,18 @@ func (h *Handler) PipelineForecast(w http.ResponseWriter, r *http.Request) {
 		response.Fail(w, err)
 		return
 	}
+	claims, ok := auth.ClaimsFromContext(r.Context())
+	if !ok {
+		response.Fail(w, apperrors.Unauthorized("authentication required"))
+		return
+	}
+	rs, err := datascope.ResolveReport(claims, permissions.ForecastsView, req.TeamID, req.OwnerUserID)
+	if err != nil {
+		response.Fail(w, err)
+		return
+	}
+	req.TeamID = rs.TeamID
+	req.OwnerUserID = rs.OwnerUserID
 	res, err := h.service.Forecast(r.Context(), req)
 	if err != nil {
 		response.Fail(w, err)

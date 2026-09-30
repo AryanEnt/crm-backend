@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/crm/backend/internal/audit"
+	"github.com/crm/backend/internal/auth"
 	"github.com/crm/backend/internal/permissions"
 	"github.com/crm/backend/pkg/apperrors"
 )
@@ -62,6 +63,8 @@ type ListFilter struct {
 	IsActive *bool
 	Limit    int
 	Offset   int
+	// Access bounds the rows returned; the zero value returns none.
+	Access Access
 }
 
 type Repository struct {
@@ -79,8 +82,16 @@ func (r *Repository) List(ctx context.Context, f ListFilter) ([]Team, int, error
 	activeClause := ""
 	args := []any{f.Search}
 	if f.IsActive != nil {
-		activeClause = " AND t.is_active = $2"
 		args = append(args, *f.IsActive)
+		activeClause = " AND t.is_active = $" + strconv.Itoa(len(args))
+	}
+	if !f.Access.organization() {
+		teamIDs := []string{}
+		if f.Access.Scope == permissions.ScopeTeam || f.Access.Scope == permissions.ScopeOwn {
+			teamIDs = append(teamIDs, f.Access.TeamIDs...)
+		}
+		args = append(args, teamIDs)
+		activeClause += " AND t.id = ANY($" + strconv.Itoa(len(args)) + "::uuid[])"
 	}
 	var total int
 	if err := r.pool.QueryRow(ctx, `
@@ -520,11 +531,30 @@ func NewService(repo *Repository, auditSvc *audit.Service) *Service {
 	return &Service{repo: repo, audit: auditSvc}
 }
 
-func (s *Service) List(ctx context.Context, f ListFilter) ([]Team, int, error) {
-	return s.repo.List(ctx, f)
+func (s *Service) List(ctx context.Context, claims auth.Claims, f ListFilter) ([]Team, int, error) {
+	access, err := accessFor(claims, permissions.TeamsView)
+	if err != nil {
+		return nil, 0, err
+	}
+	f.Access = access
+	items, total, err := s.repo.List(ctx, f)
+	if err != nil {
+		return nil, 0, apperrors.Internal("failed to list teams", err)
+	}
+	for i := range items {
+		access.Redact(&items[i])
+	}
+	return items, total, nil
 }
 
-func (s *Service) Get(ctx context.Context, id string) (*Team, error) {
+func (s *Service) Get(ctx context.Context, claims auth.Claims, id string) (*Team, error) {
+	access, err := accessFor(claims, permissions.TeamsView)
+	if err != nil {
+		return nil, err
+	}
+	if !access.CanSee(id) {
+		return nil, apperrors.NotFound("team not found")
+	}
 	t, err := s.repo.Get(ctx, id)
 	if err != nil {
 		return nil, apperrors.Internal("failed to load team", err)
@@ -532,10 +562,19 @@ func (s *Service) Get(ctx context.Context, id string) (*Team, error) {
 	if t == nil {
 		return nil, apperrors.NotFound("team not found")
 	}
+	access.Redact(t)
 	return t, nil
 }
 
-func (s *Service) Create(ctx context.Context, actorID string, in CreateInput, ip, ua string) (*Team, error) {
+func (s *Service) Create(ctx context.Context, claims auth.Claims, in CreateInput, ip, ua string) (*Team, error) {
+	access, err := accessFor(claims, permissions.TeamsCreate)
+	if err != nil {
+		return nil, err
+	}
+	if err := access.requireOrganization(); err != nil {
+		return nil, err
+	}
+	actorID := claims.UserID
 	if strings.TrimSpace(in.Name) == "" {
 		return nil, apperrors.Validation("name is required")
 	}
@@ -571,7 +610,18 @@ func (s *Service) Create(ctx context.Context, actorID string, in CreateInput, ip
 	return team, nil
 }
 
-func (s *Service) Update(ctx context.Context, actorID, id string, in UpdateInput, ip, ua string) (*Team, error) {
+func (s *Service) Update(ctx context.Context, claims auth.Claims, id string, in UpdateInput, ip, ua string) (*Team, error) {
+	access, err := accessFor(claims, permissions.TeamsEdit, permissions.TeamsAssign)
+	if err != nil {
+		return nil, err
+	}
+	if !access.CanSee(id) {
+		return nil, apperrors.NotFound("team not found")
+	}
+	if err := access.requireOrganization(); err != nil {
+		return nil, err
+	}
+	actorID := claims.UserID
 	before, err := s.repo.Get(ctx, id)
 	if err != nil {
 		return nil, apperrors.Internal("failed to load team", err)
@@ -648,7 +698,18 @@ func (s *Service) Update(ctx context.Context, actorID, id string, in UpdateInput
 	return team, nil
 }
 
-func (s *Service) SetActive(ctx context.Context, actorID, id string, active bool, ip, ua string) (*Team, error) {
+func (s *Service) SetActive(ctx context.Context, claims auth.Claims, id string, active bool, ip, ua string) (*Team, error) {
+	access, err := accessFor(claims, permissions.TeamsDelete)
+	if err != nil {
+		return nil, err
+	}
+	if !access.CanSee(id) {
+		return nil, apperrors.NotFound("team not found")
+	}
+	if err := access.requireOrganization(); err != nil {
+		return nil, err
+	}
+	actorID := claims.UserID
 	team, err := s.repo.SetActive(ctx, id, active)
 	if err != nil {
 		return nil, apperrors.Internal("failed to update team status", err)

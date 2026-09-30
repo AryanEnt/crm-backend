@@ -9,6 +9,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/crm/backend/internal/auth"
+	"github.com/crm/backend/internal/datascope"
 )
 
 const (
@@ -58,6 +60,9 @@ type ListFilter struct {
 	Q          string
 	Limit      int
 	Offset     int
+	// Scope and Viewer restrict rows to documents the caller can see.
+	Scope  datascope.Visibility
+	Viewer auth.Claims
 }
 
 type RequestInput struct {
@@ -141,6 +146,7 @@ func (r *Repository) List(ctx context.Context, f ListFilter) ([]Document, int, e
 		args = append(args, "%"+strings.ToLower(f.Q)+"%")
 		where = append(where, "(lower(d.name) LIKE $"+itoa(len(args))+" OR lower(d.doc_type) LIKE $"+itoa(len(args))+")")
 	}
+	where, args = datascope.Documents.AppendScope(where, args, f.Scope, f.Viewer)
 	whereSQL := strings.Join(where, " AND ")
 	var total int
 	if err := r.pool.QueryRow(ctx, `SELECT COUNT(*) FROM documents d WHERE `+whereSQL, args...).Scan(&total); err != nil {

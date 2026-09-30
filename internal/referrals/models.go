@@ -24,6 +24,15 @@ type Partner struct {
 	UpdatedAt time.Time `json:"updatedAt"`
 }
 
+// ReferrerUser is the minimal internal-user projection for referrer selection,
+// available to callers who cannot access the admin users directory.
+type ReferrerUser struct {
+	ID       string `json:"id"`
+	FullName string `json:"fullName"`
+	Email    string `json:"email"`
+	RoleName string `json:"roleName"`
+}
+
 type Referral struct {
 	ID                   string     `json:"id"`
 	LeadID               *string    `json:"leadId"`

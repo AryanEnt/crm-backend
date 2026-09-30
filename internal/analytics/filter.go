@@ -19,6 +19,17 @@ type Filter struct {
 	Period       string // day | week | month
 	SortBy       string
 	SortDir      string
+	// ScopeUserIDs / ScopeTeamIDs bound breakdown rows; nil means unrestricted.
+	ScopeUserIDs []string
+	ScopeTeamIDs []string
+}
+
+// textArray passes nil slices as SQL NULL so "$n::text[] IS NULL" means unrestricted.
+func textArray(ids []string) any {
+	if ids == nil {
+		return nil
+	}
+	return ids
 }
 
 func ParseFilter(q map[string]string) (Filter, error) {
@@ -102,6 +113,15 @@ type sqlBuilder struct {
 func (b *sqlBuilder) add(cond string, v any) {
 	b.args = append(b.args, v)
 	b.where = append(b.where, strings.Replace(cond, "?", "$"+strconv.Itoa(len(b.args)), 1))
+}
+
+// addAll binds vs, in order, to the "?" placeholders in cond.
+func (b *sqlBuilder) addAll(cond string, vs ...any) {
+	for _, v := range vs {
+		b.args = append(b.args, v)
+		cond = strings.Replace(cond, "?", "$"+strconv.Itoa(len(b.args)), 1)
+	}
+	b.where = append(b.where, cond)
 }
 
 func (b *sqlBuilder) sql() string {

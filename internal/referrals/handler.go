@@ -141,6 +141,15 @@ func (h *Handler) ListPartners(w http.ResponseWriter, r *http.Request) {
 	response.OK(w, items)
 }
 
+func (h *Handler) ListReferrerUsers(w http.ResponseWriter, r *http.Request) {
+	items, err := h.service.ListReferrerUsers(r.Context(), r.URL.Query().Get("q"))
+	if err != nil {
+		response.Fail(w, err)
+		return
+	}
+	response.OK(w, items)
+}
+
 func (h *Handler) CreatePartner(w http.ResponseWriter, r *http.Request) {
 	var body CreatePartnerInput
 	if err := validate.DecodeJSON(r, &body); err != nil {

@@ -525,6 +525,33 @@ func (r *Repository) ListPartners(ctx context.Context, q string, limit int) ([]P
 	return out, rows.Err()
 }
 
+func (r *Repository) ListReferrerUsers(ctx context.Context, q string, limit int) ([]ReferrerUser, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT u.id::text, u.full_name, u.email, r.name
+		FROM users u
+		JOIN roles r ON r.id = u.role_id
+		WHERE u.is_active = TRUE
+		  AND ($1 = '' OR u.full_name ILIKE '%' || $1 || '%' OR u.email ILIKE '%' || $1 || '%')
+		ORDER BY u.full_name
+		LIMIT $2`, q, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ReferrerUser{}
+	for rows.Next() {
+		var u ReferrerUser
+		if err := rows.Scan(&u.ID, &u.FullName, &u.Email, &u.RoleName); err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
 func (r *Repository) CreatePartner(ctx context.Context, in CreatePartnerInput) (*Partner, error) {
 	id := uuid.NewString()
 	var email any

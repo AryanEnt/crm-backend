@@ -12,10 +12,12 @@ import (
 	"github.com/crm/backend/internal/audit"
 	"github.com/crm/backend/internal/auth"
 	"github.com/crm/backend/internal/automation"
+	"github.com/crm/backend/internal/calls"
 	"github.com/crm/backend/internal/communications"
 	"github.com/crm/backend/internal/config"
 	"github.com/crm/backend/internal/customers"
 	"github.com/crm/backend/internal/customfields"
+	"github.com/crm/backend/internal/datascope"
 	"github.com/crm/backend/internal/deals"
 	"github.com/crm/backend/internal/documents"
 	"github.com/crm/backend/internal/email"
@@ -35,6 +37,8 @@ import (
 	"github.com/crm/backend/internal/teams"
 	"github.com/crm/backend/internal/timeline"
 	"github.com/crm/backend/internal/users"
+	"github.com/crm/backend/pkg/apperrors"
+	"github.com/crm/backend/pkg/response"
 )
 
 type Dependencies struct {
@@ -131,6 +135,9 @@ func NewRouter(deps Dependencies) (http.Handler, *automation.Worker, *email.Work
 	activitiesHandler := activities.NewHandler(activitiesService)
 	dealsService.SetFollowUps(activitiesService)
 
+	callsService := calls.NewService(calls.NewRepository(deps.Pool), leadsRepo, customersRepo, timelineService)
+	callsHandler := calls.NewHandler(callsService)
+
 	analyticsRepo := analytics.NewRepository(deps.Pool)
 	analyticsService := analytics.NewService(analyticsRepo)
 	analyticsHandler := analytics.NewHandler(analyticsService)
@@ -179,6 +186,52 @@ func NewRouter(deps Dependencies) (http.Handler, *automation.Worker, *email.Work
 		return authMW.Authenticate(stack)
 	}
 
+	// inScope 404s unless the {id} record is inside the caller's widest data scope
+	// across perms. Handlers behind it load by id alone, so this is their ownership check.
+	inScope := func(rec datascope.Record, perms []string, h http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			claims, _ := auth.ClaimsFromContext(r.Context())
+			if err := datascope.RequireRecord(r.Context(), deps.Pool, claims, rec, r.PathValue("id"), perms...); err != nil {
+				response.Fail(w, err)
+				return
+			}
+			h(w, r)
+		}
+	}
+	// customFieldRecord is inScope for /custom-fields/values/{entity}/{recordId}.
+	customFieldRecord := func(edit bool, h http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			var rec datascope.Record
+			var perms []string
+			switch r.PathValue("entity") {
+			case "lead":
+				rec, perms = datascope.Leads, []string{permissions.LeadsView, permissions.LeadsEdit}
+			case "customer":
+				rec, perms = datascope.Customers, []string{permissions.CustomersView, permissions.CustomersEdit}
+			case "deal":
+				rec, perms = datascope.Deals, []string{permissions.DealsView, permissions.DealsEdit}
+			case "activity":
+				rec, perms = datascope.Activities, []string{permissions.ActivitiesView, permissions.ActivitiesEdit}
+			default:
+				response.Fail(w, apperrors.NotFound("record not found"))
+				return
+			}
+			// custom_fields:view is a catalog grant, so reads follow the record's own view scope.
+			// custom_fields:manage is admin-only and lets Super Admin fill values without entity edit.
+			if edit {
+				perms = []string{perms[1], permissions.CustomFieldsManage}
+			} else {
+				perms = perms[:1]
+			}
+			claims, _ := auth.ClaimsFromContext(r.Context())
+			if err := datascope.RequireRecord(r.Context(), deps.Pool, claims, rec, r.PathValue("recordId"), perms...); err != nil {
+				response.Fail(w, err)
+				return
+			}
+			h(w, r)
+		}
+	}
+
 	mux.Handle("GET /api/v1/users", protect([]string{permissions.UsersView, permissions.UsersManage}, usersHandler.List))
 	mux.Handle("POST /api/v1/users", protect([]string{permissions.UsersCreate, permissions.UsersManage}, usersHandler.Create))
 	mux.Handle("GET /api/v1/users/{id}", protect([]string{permissions.UsersView, permissions.UsersManage}, usersHandler.Get))
@@ -206,28 +259,31 @@ func NewRouter(deps Dependencies) (http.Handler, *automation.Worker, *email.Work
 
 	mux.Handle("GET /api/v1/leads", protect([]string{permissions.LeadsView}, leadsHandler.List))
 	mux.Handle("POST /api/v1/leads", protect([]string{permissions.LeadsCreate}, leadsHandler.Create))
-	mux.Handle("GET /api/v1/leads/{id}", protect([]string{permissions.LeadsView}, leadsHandler.Get))
-	mux.Handle("PATCH /api/v1/leads/{id}", protect([]string{permissions.LeadsEdit}, leadsHandler.Update))
+	leadView, leadEdit := []string{permissions.LeadsView}, []string{permissions.LeadsEdit}
+	mux.Handle("GET /api/v1/leads/{id}", protect(leadView, inScope(datascope.Leads, leadView, leadsHandler.Get)))
+	mux.Handle("PATCH /api/v1/leads/{id}", protect(leadEdit, inScope(datascope.Leads, leadEdit, leadsHandler.Update)))
 	mux.Handle("POST /api/v1/leads/bulk-archive", protect([]string{permissions.LeadsDelete}, leadsHandler.BulkArchive))
 	mux.Handle("POST /api/v1/leads/bulk-assign", protect([]string{permissions.LeadsAssign}, leadsHandler.BulkAssign))
 	mux.Handle("POST /api/v1/leads/bulk-stage", protect([]string{permissions.LeadsEdit}, leadsHandler.BulkStage))
 	mux.Handle("POST /api/v1/leads/check-duplicates", protect([]string{permissions.LeadsCreate, permissions.LeadsEdit}, leadsHandler.CheckDuplicates))
-	mux.Handle("POST /api/v1/leads/{id}/qualify", protect([]string{permissions.LeadsEdit}, leadsHandler.Qualify))
-	mux.Handle("POST /api/v1/leads/{id}/convert", protect([]string{permissions.LeadsEdit, permissions.CustomersCreate}, customersHandler.ConvertLead))
+	mux.Handle("POST /api/v1/leads/{id}/qualify", protect(leadEdit, inScope(datascope.Leads, leadEdit, leadsHandler.Qualify)))
+	mux.Handle("POST /api/v1/leads/{id}/convert", protect([]string{permissions.LeadsEdit, permissions.CustomersCreate}, inScope(datascope.Leads, leadEdit, customersHandler.ConvertLead)))
 
-	mux.Handle("GET /api/v1/customers", protect([]string{permissions.CustomersView}, customersHandler.List))
+	customerView, customerEdit := []string{permissions.CustomersView}, []string{permissions.CustomersEdit}
+	mux.Handle("GET /api/v1/customers", protect(customerView, customersHandler.List))
 	mux.Handle("POST /api/v1/customers", protect([]string{permissions.CustomersCreate}, customersHandler.Create))
-	mux.Handle("GET /api/v1/customers/{id}", protect([]string{permissions.CustomersView}, customersHandler.Get))
-	mux.Handle("GET /api/v1/customers/{id}/profile", protect([]string{permissions.CustomersView}, customersHandler.Get360))
-	mux.Handle("PATCH /api/v1/customers/{id}", protect([]string{permissions.CustomersEdit}, customersHandler.Update))
+	mux.Handle("GET /api/v1/customers/{id}", protect(customerView, inScope(datascope.Customers, customerView, customersHandler.Get)))
+	mux.Handle("GET /api/v1/customers/{id}/profile", protect(customerView, inScope(datascope.Customers, customerView, customersHandler.Get360)))
+	mux.Handle("PATCH /api/v1/customers/{id}", protect(customerEdit, inScope(datascope.Customers, customerEdit, customersHandler.Update)))
 
 	mux.Handle("GET /api/v1/deals", protect([]string{permissions.DealsView}, dealsHandler.List))
 	mux.Handle("GET /api/v1/deals/board", protect([]string{permissions.DealsView}, dealsHandler.Board))
 	mux.Handle("POST /api/v1/deals", protect([]string{permissions.DealsCreate}, dealsHandler.Create))
-	mux.Handle("GET /api/v1/deals/{id}", protect([]string{permissions.DealsView}, dealsHandler.Get))
-	mux.Handle("PATCH /api/v1/deals/{id}", protect([]string{permissions.DealsEdit}, dealsHandler.Update))
-	mux.Handle("POST /api/v1/deals/{id}/move", protect([]string{permissions.DealsEdit}, dealsHandler.Move))
-	mux.Handle("POST /api/v1/deals/{id}/documents", protect([]string{permissions.DealsEdit}, dealsHandler.AddDocument))
+	dealView, dealEdit := []string{permissions.DealsView}, []string{permissions.DealsEdit}
+	mux.Handle("GET /api/v1/deals/{id}", protect(dealView, inScope(datascope.Deals, dealView, dealsHandler.Get)))
+	mux.Handle("PATCH /api/v1/deals/{id}", protect(dealEdit, inScope(datascope.Deals, dealEdit, dealsHandler.Update)))
+	mux.Handle("POST /api/v1/deals/{id}/move", protect(dealEdit, inScope(datascope.Deals, dealEdit, dealsHandler.Move)))
+	mux.Handle("POST /api/v1/deals/{id}/documents", protect(dealEdit, inScope(datascope.Deals, dealEdit, dealsHandler.AddDocument)))
 
 	mux.Handle("GET /api/v1/lead-sources", protect([]string{permissions.LeadSourcesView, permissions.LeadsCreate, permissions.LeadsEdit}, leadSourcesHandler.List))
 	mux.Handle("POST /api/v1/lead-sources", protect([]string{permissions.LeadSourcesManage}, leadSourcesHandler.Create))
@@ -236,8 +292,8 @@ func NewRouter(deps Dependencies) (http.Handler, *automation.Worker, *email.Work
 
 	mux.Handle("GET /api/v1/custom-fields", protect([]string{permissions.CustomFieldsView, permissions.LeadsView, permissions.CustomersView, permissions.DealsView, permissions.ActivitiesView}, customFieldsHandler.List))
 	mux.Handle("POST /api/v1/custom-fields", protect([]string{permissions.CustomFieldsManage}, customFieldsHandler.Create))
-	mux.Handle("GET /api/v1/custom-fields/values/{entity}/{recordId}", protect([]string{permissions.CustomFieldsView, permissions.LeadsView, permissions.CustomersView, permissions.DealsView, permissions.ActivitiesView}, customFieldsHandler.GetValues))
-	mux.Handle("PUT /api/v1/custom-fields/values/{entity}/{recordId}", protect([]string{permissions.LeadsEdit, permissions.CustomersEdit, permissions.DealsEdit, permissions.ActivitiesEdit, permissions.CustomFieldsManage}, customFieldsHandler.SetValues))
+	mux.Handle("GET /api/v1/custom-fields/values/{entity}/{recordId}", protect([]string{permissions.CustomFieldsView, permissions.LeadsView, permissions.CustomersView, permissions.DealsView, permissions.ActivitiesView}, customFieldRecord(false, customFieldsHandler.GetValues)))
+	mux.Handle("PUT /api/v1/custom-fields/values/{entity}/{recordId}", protect([]string{permissions.LeadsEdit, permissions.CustomersEdit, permissions.DealsEdit, permissions.ActivitiesEdit, permissions.CustomFieldsManage}, customFieldRecord(true, customFieldsHandler.SetValues)))
 	mux.Handle("GET /api/v1/custom-fields/{id}", protect([]string{permissions.CustomFieldsView, permissions.CustomFieldsManage}, customFieldsHandler.Get))
 	mux.Handle("PATCH /api/v1/custom-fields/{id}", protect([]string{permissions.CustomFieldsManage}, customFieldsHandler.Update))
 	mux.Handle("DELETE /api/v1/custom-fields/{id}", protect([]string{permissions.CustomFieldsManage}, customFieldsHandler.Delete))
@@ -262,21 +318,33 @@ func NewRouter(deps Dependencies) (http.Handler, *automation.Worker, *email.Work
 	mux.Handle("GET /api/v1/activities/calendar", protect([]string{permissions.ActivitiesView}, activitiesHandler.Calendar))
 	mux.Handle("GET /api/v1/activities/follow-up", protect([]string{permissions.ActivitiesView}, activitiesHandler.FollowUp))
 	mux.Handle("POST /api/v1/activities", protect([]string{permissions.ActivitiesCreate}, activitiesHandler.Create))
-	mux.Handle("GET /api/v1/activities/{id}", protect([]string{permissions.ActivitiesView}, activitiesHandler.Get))
-	mux.Handle("PATCH /api/v1/activities/{id}", protect([]string{permissions.ActivitiesEdit}, activitiesHandler.Update))
+	activityView, activityEdit := []string{permissions.ActivitiesView}, []string{permissions.ActivitiesEdit}
+	mux.Handle("GET /api/v1/activities/{id}", protect(activityView, inScope(datascope.Activities, activityView, activitiesHandler.Get)))
+	mux.Handle("PATCH /api/v1/activities/{id}", protect(activityEdit, inScope(datascope.Activities, activityEdit, activitiesHandler.Update)))
 	mux.Handle("GET /api/v1/me/timezone", protect(nil, activitiesHandler.GetTimezone))
 	mux.Handle("PATCH /api/v1/me/timezone", protect(nil, activitiesHandler.SetTimezone))
 
 	mux.Handle("GET /api/v1/documents", protect([]string{permissions.DocumentsView}, docsHandler.List))
 	mux.Handle("POST /api/v1/documents/request", protect([]string{permissions.DocumentsCreate}, docsHandler.Request))
 	mux.Handle("POST /api/v1/documents/upload", protect([]string{permissions.DocumentsCreate}, docsHandler.Upload))
-	mux.Handle("GET /api/v1/documents/{id}", protect([]string{permissions.DocumentsView}, docsHandler.Get))
-	mux.Handle("PATCH /api/v1/documents/{id}", protect([]string{permissions.DocumentsEdit}, docsHandler.Update))
-	mux.Handle("DELETE /api/v1/documents/{id}", protect([]string{permissions.DocumentsDelete}, docsHandler.Delete))
-	mux.Handle("GET /api/v1/documents/{id}/download", protect([]string{permissions.DocumentsView}, docsHandler.Download))
-	mux.Handle("POST /api/v1/documents/{id}/upload", protect([]string{permissions.DocumentsCreate}, docsHandler.Upload))
-	mux.Handle("POST /api/v1/documents/{id}/verify", protect([]string{permissions.DocumentsEdit}, docsHandler.Verify))
-	mux.Handle("POST /api/v1/documents/{id}/reject", protect([]string{permissions.DocumentsEdit}, docsHandler.Reject))
+	docView, docEdit := []string{permissions.DocumentsView}, []string{permissions.DocumentsEdit}
+	docDelete, docCreate := []string{permissions.DocumentsDelete}, []string{permissions.DocumentsCreate}
+	mux.Handle("GET /api/v1/documents/{id}", protect(docView, inScope(datascope.Documents, docView, docsHandler.Get)))
+	mux.Handle("PATCH /api/v1/documents/{id}", protect(docEdit, inScope(datascope.Documents, docEdit, docsHandler.Update)))
+	mux.Handle("DELETE /api/v1/documents/{id}", protect(docDelete, inScope(datascope.Documents, docDelete, docsHandler.Delete)))
+	mux.Handle("GET /api/v1/documents/{id}/download", protect(docView, inScope(datascope.Documents, docView, docsHandler.Download)))
+	mux.Handle("POST /api/v1/documents/{id}/upload", protect(docCreate, inScope(datascope.Documents, docCreate, docsHandler.Upload)))
+	mux.Handle("POST /api/v1/documents/{id}/verify", protect(docEdit, inScope(datascope.Documents, docEdit, docsHandler.Verify)))
+	mux.Handle("POST /api/v1/documents/{id}/reject", protect(docEdit, inScope(datascope.Documents, docEdit, docsHandler.Reject)))
+
+	callsView := []string{permissions.LeadsView, permissions.CustomersView}
+	mux.Handle("GET /api/v1/calls/contacts", protect(callsView, callsHandler.Contacts))
+	mux.Handle("GET /api/v1/calls/context", protect(callsView, callsHandler.Context))
+	mux.Handle("GET /api/v1/calls/history", protect(callsView, callsHandler.History))
+	mux.Handle("GET /api/v1/calls/notes", protect(callsView, callsHandler.ListNotes))
+	mux.Handle("POST /api/v1/calls/notes", protect([]string{permissions.ActivitiesCreate}, callsHandler.CreateNote))
+	mux.Handle("PATCH /api/v1/calls/notes/{id}", protect([]string{permissions.ActivitiesEdit}, callsHandler.UpdateNote))
+	mux.Handle("DELETE /api/v1/calls/notes/{id}", protect([]string{permissions.ActivitiesEdit}, callsHandler.DeleteNote))
 
 	mux.Handle("GET /api/v1/timeline", protect([]string{permissions.CustomersView, permissions.LeadsView, permissions.DealsView, permissions.ActivitiesView}, timelineHandler.List))
 	mux.Handle("GET /api/v1/timeline/types", protect([]string{permissions.CustomersView, permissions.LeadsView, permissions.DealsView}, timelineHandler.EventTypes))
@@ -308,10 +376,12 @@ func NewRouter(deps Dependencies) (http.Handler, *automation.Worker, *email.Work
 	mux.Handle("GET /api/v1/predictions/catalog", protect([]string{permissions.PredictionsView, permissions.PredictionsManage}, predHandler.Catalog))
 	mux.Handle("GET /api/v1/predictions/workload", protect([]string{permissions.PredictionsView, permissions.PredictionsManage}, predHandler.Workload))
 	mux.Handle("GET /api/v1/predictions/pipeline-risk", protect([]string{permissions.PredictionsView, permissions.PredictionsManage}, predHandler.PipelineRisk))
-	mux.Handle("POST /api/v1/predictions/leads/{id}/score", protect([]string{permissions.PredictionsManage, permissions.PredictionsView}, predHandler.ScoreLead))
-	mux.Handle("GET /api/v1/predictions/leads/{id}/score-history", protect([]string{permissions.PredictionsView, permissions.PredictionsManage}, predHandler.LeadScoreHistory))
-	mux.Handle("GET /api/v1/predictions/leads/{id}/insights", protect([]string{permissions.PredictionsView, permissions.PredictionsManage}, predHandler.LeadInsights))
-	mux.Handle("GET /api/v1/predictions/deals/{id}/insights", protect([]string{permissions.PredictionsView, permissions.PredictionsManage}, predHandler.DealInsights))
+	// Scoped by the record's own view grant: predictions:view carries organization scope.
+	predictionsAny := []string{permissions.PredictionsView, permissions.PredictionsManage}
+	mux.Handle("POST /api/v1/predictions/leads/{id}/score", protect(predictionsAny, inScope(datascope.Leads, leadView, predHandler.ScoreLead)))
+	mux.Handle("GET /api/v1/predictions/leads/{id}/score-history", protect(predictionsAny, inScope(datascope.Leads, leadView, predHandler.LeadScoreHistory)))
+	mux.Handle("GET /api/v1/predictions/leads/{id}/insights", protect(predictionsAny, inScope(datascope.Leads, leadView, predHandler.LeadInsights)))
+	mux.Handle("GET /api/v1/predictions/deals/{id}/insights", protect(predictionsAny, inScope(datascope.Deals, dealView, predHandler.DealInsights)))
 
 	mux.Handle("GET /api/v1/automations/catalog", protect([]string{permissions.AutomationsView, permissions.AutomationsManage}, autoHandler.Catalog))
 	mux.Handle("GET /api/v1/automations", protect([]string{permissions.AutomationsView, permissions.AutomationsManage}, autoHandler.List))
@@ -338,7 +408,8 @@ func NewRouter(deps Dependencies) (http.Handler, *automation.Worker, *email.Work
 	mux.Handle("GET /api/v1/referrals/{id}", protect([]string{permissions.ReferralsView, permissions.ReferralsManage}, referralsHandler.Get))
 	mux.Handle("PATCH /api/v1/referrals/{id}", protect([]string{permissions.ReferralsEdit, permissions.ReferralsManage}, referralsHandler.Update))
 	mux.Handle("GET /api/v1/referrers/{type}/{id}", protect([]string{permissions.ReferralsView, permissions.ReferralsManage}, referralsHandler.ReferrerProfile))
-	mux.Handle("GET /api/v1/referral-partners", protect([]string{permissions.ReferralsView, permissions.ReferralsManage, permissions.LeadsCreate}, referralsHandler.ListPartners))
+	mux.Handle("GET /api/v1/referral-partners", protect([]string{permissions.ReferralsView, permissions.ReferralsManage, permissions.LeadsCreate, permissions.CustomersCreate}, referralsHandler.ListPartners))
+	mux.Handle("GET /api/v1/referrals/referrer-users", protect([]string{permissions.ReferralsView, permissions.ReferralsManage, permissions.LeadsCreate, permissions.CustomersCreate}, referralsHandler.ListReferrerUsers))
 	mux.Handle("POST /api/v1/referral-partners", protect([]string{permissions.ReferralsCreate, permissions.ReferralsManage}, referralsHandler.CreatePartner))
 
 	// Provider webhooks — public, authenticity validated per provider (no JWT).
